@@ -1,0 +1,74 @@
+ORDERS TABLE COLUMNS WITH EXCEL COLUMN MAPPINGS
+==================================================
+
+1.  id                                       → N/A (system generated)
+2.  created_at                               → N/A (system generated)
+3.  updated_at                               → N/A (system generated)
+4.  timestamp                                → timestamp
+5.  store_name                               → Store No_
+6.  pos_terminal_no                          → POS Terminal No_
+7.  transaction_number                       → Transaction No_
+8.  date                                     → Date
+9.  transaction_type                         → Transaction Type
+10. bill_number                              → Receipt No_
+11. vat_bus_posting_group                    → VAT Bus_Posting Group
+12. created_on_pos_terminal                  → Created on POS Terminal
+13. staff_id                                 → Staff ID
+14. original_date                            → Original Date
+15. bill_time                                → Time
+16. shift_date                               → Shift Date
+17. net_sale                                 → Net Amount
+18. cost_amount                              → Cost Amount
+19. gross_amount                             → Gross Amount
+20. payment                                  → Payment
+21. discount                                 → Discount Amount
+22. no_of_items                              → No_ of Items
+23. rounded                                  → Rounded
+24. entry_status                             → Entry Status
+25. no_of_item_lines                         → No_ of Item Lines
+26. statement_code                           → Statement Code
+27. to_account                               → To Account
+28. no_of_payment_lines                      → No_ of Payment Lines
+29. time_when_total_pressed                  → Time when Total Pressed
+30. time_when_trans_closed                   → Time when Trans_ Closed
+31. table_no                                 → Table No_
+32. no_of_covers                             → No_ of Covers_
+33. sell_to_contact_no                       → Sell-to Contact No_
+34. sales_type                               → Sales Type
+35. open_drawer                              → Open Drawer
+36. counter1                                 → Counter1
+37. delivered                                → Delivered
+38. comment                                  → Comment
+39. no_of_covers_aib                         → No_ of Covers - AIB
+40. staff_name                               → Staff Name
+41. permission_group                         → Permission Group
+42. pre_receipt_counter                      → Pre Receipt Counter
+43. server_id                                → Server ID
+44. managar_name                             → Managar Name
+45. token_no                                 → Token No_
+46. yum_week                                 → Yum Week
+47. return_manager_name                      → Return Manager Name
+48. bill_print_status                        → Bill Print Status
+49. last_printing_date                       → Last Printing Date
+50. replication_counter                      → Replication Counter
+51. sap_counter                              → SAP Counter
+52. coupon_no                                → Coupon No_
+53. web_order_no                             → Web Order No_
+54. paytm_counter                            → PAyTm Counter
+55. tax_liable                               → Tax Liable
+56. tax_area_code                            → Tax Area Code
+57. state_in                                 → State-IN
+58. service_tax_registration_no              → Service Tax Registration No_
+59. service_tax_amount                       → Service Tax Amount
+60. service_tax_entry                        → Service Tax Entry
+61. instance_id                              → Instance ID
+62. void_date                                → Void Date
+63. online_void_time                         → Online Void Time
+64. online_order_taker                       → Online Order Taker
+65. order_received_time                      → Order Received Time
+66. dispatch_time                            → Dispatch Time
+67. deliver_time                             → Deliver Time
+68. food_ready                               → Food ready
+69. sent_qr_code                             → Sent Qr Code
+70. load_time                                → Load Time
+

@@ -1,0 +1,81 @@
+ai_mapping:
+  enabled: true
+  few_shots_ref: payment_zomato
+  forced_mappings:
+    Order ID: payment_ref
+    Restaurant ID: merchant_id
+    Settlement Amount: amount
+    Settlement Date: settlement_date
+    UTR Number: settlement_batch_id
+  model: gpt-4o-mini
+  temperature: 0.1
+amount_locale: en_IN
+date_format_hints:
+- dd-MM-yyyy
+- yyyy-MM-dd
+- dd/MM/yy
+delimiter: ','
+dq_rules:
+  business_rules:
+  - description: Validate commission calculation
+    name: commission_validation
+    rule: gross_amount - amount <= gross_amount * 0.30
+  enum_sets:
+    status:
+    - SETTLED
+    - PENDING
+    - FAILED
+  non_null:
+  - payment_ref
+  - amount
+  require_columns:
+  - payment_ref
+  - amount
+  - settlement_date
+  valid_range:
+    amount:
+      max: 50000
+      min: 0
+    settlement_date:
+      max_date: today+1
+      min_date: '2020-01-01'
+encoding: utf-8
+entity: payment
+file_pattern: zomato_settlement_*.{xlsx,csv}
+header_rows: 1
+load:
+  batch_size: 5000
+  dedupe_keys:
+  - payment_ref
+  - settlement_date
+  parallel_loading: true
+  target_table: fin_payments
+  upsert_key:
+  - payment_ref
+location:
+  sftp:
+    host: settlements.zomato.com
+    key_file: configs/keys/zomato_sftp.pem
+    password: ${ZOMATO_SFTP_PASS}
+    port: 22
+    remote_dir: /partner/settlements
+    username: ${ZOMATO_SFTP_USER}
+mode: sftp
+notifications:
+  email_to:
+  - ops@restaurant.com
+  - finance@restaurant.com
+  on_stages:
+  - INGESTED
+  - VALIDATED
+  - LOADED
+  - RECON_COMPLETE
+  - EXCEPTIONS
+  slack_channel: '#finance-ops'
+  webhook_url: https://api.restaurant.com/webhooks/zomato-settlement
+recon:
+  auto_run: true
+  join_with: fin_bank_statements
+  ruleset: zomato_bank_settlement
+  schedule: '*/30 * * * *'
+source_id: platform_zomato_settlements
