@@ -10,6 +10,7 @@ import os
 import shutil
 import glob
 from datetime import datetime
+import pandas as pd
 
 from app.services.email_service import EmailService
 from app.services.mongodb_service import mongodb_service
@@ -111,6 +112,7 @@ class DataController:
             # Save files
             file_paths = []
             upload_ids = []
+            data_save_results = []
             for file in files:
                 # Generate filename if not provided
                 if not file.filename:
@@ -143,6 +145,59 @@ class DataController:
                 file_paths.append(absolute_path)
                 logger.info(f"✅ File saved: {absolute_path} (size: {total_size} bytes)")
                 
+                # Parse Excel/CSV file and extract row-wise data
+                try:
+                    # Determine file type and read accordingly
+                    if filename.lower().endswith('.csv'):
+                        df = pd.read_csv(absolute_path)
+                    else:
+                        # Excel file - read first sheet by default
+                        df = pd.read_excel(absolute_path, engine='openpyxl')
+                    
+                    # Replace NaN/NaT with None for MongoDB compatibility
+                    df = df.replace({pd.NA: None, pd.NaT: None})
+                    
+                    # Convert DataFrame to row-wise format (list of dictionaries)
+                    # Each dictionary represents one row with column names as keys and row values as values
+                    row_data = df.to_dict('records')
+                    
+                    logger.info(f"📊 Parsed Excel file: {len(df.columns)} columns, {len(df)} rows")
+                    
+                    # Save row-wise data to MongoDB collection (collection name = datasource lowercase)
+                    if row_data:
+                        save_result = mongodb_service.save_excel_data_row_wise(
+                            collection_name=datasource,
+                            row_data=row_data
+                        )
+                        data_save_results.append({
+                            "filename": filename,
+                            "success": save_result.get("success", False),
+                            "rows_inserted": save_result.get("rows_inserted", 0),
+                            "columns_count": save_result.get("columns_count", 0),
+                            "collection_name": save_result.get("collection_name", datasource.lower()),
+                            "message": save_result.get("message", "")
+                        })
+                        if save_result.get("success"):
+                            logger.info(f"✅ Saved {save_result.get('rows_inserted', 0)} rows to MongoDB collection '{datasource.lower()}'")
+                        else:
+                            logger.warning(f"⚠️ Failed to save Excel data to MongoDB: {save_result.get('message')}")
+                    else:
+                        logger.warning("⚠️ No row data found in Excel file")
+                        data_save_results.append({
+                            "filename": filename,
+                            "success": False,
+                            "message": "No row data found in Excel file"
+                        })
+                        
+                except Exception as parse_error:
+                    logger.error(f"❌ Error parsing Excel file: {str(parse_error)}")
+                    data_save_results.append({
+                        "filename": filename,
+                        "success": False,
+                        "message": f"Error parsing Excel file: {str(parse_error)}"
+                    })
+                    # Continue even if parsing fails - file is still saved
+                
                 # Save metadata to MongoDB
                 upload_id = mongodb_service.save_uploaded_file(
                     filename=filename,
@@ -165,7 +220,9 @@ class DataController:
                     "files_stored": len(file_paths),
                     "file_paths": file_paths,
                     "upload_ids": upload_ids if upload_ids else None,
-                    "mongodb_connected": mongodb_service.is_connected()
+                    "mongodb_connected": mongodb_service.is_connected(),
+                    "collection_name": datasource.lower(),
+                    "data_save_results": data_save_results if data_save_results else None
                 }
             }
             
