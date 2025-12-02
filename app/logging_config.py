@@ -30,6 +30,11 @@ def setup_logging(log_level: str = "INFO"):
     # Set specific logger levels
     logging.getLogger("uvicorn").setLevel(logging.INFO)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    
+    # Reduce PyMongo verbosity (connection pooling and heartbeat logs are too verbose)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    logging.getLogger("pymongo.connection").setLevel(logging.WARNING)
+    logging.getLogger("pymongo.topology").setLevel(logging.WARNING)
 
 
 class RequestLogger:

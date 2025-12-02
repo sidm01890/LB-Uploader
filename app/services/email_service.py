@@ -13,8 +13,6 @@ from datetime import datetime
 from typing import List, Dict, Optional
 import logging
 from pathlib import Path
-import mysql.connector
-from app.config import MYSQL_HOST, MYSQL_PORT, MYSQL_USER, MYSQL_PASSWORD, MYSQL_DB
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +40,8 @@ class EmailService:
         notification_type: str = 'both'
     ) -> List[Dict[str, str]]:
         """
-        Fetch recipient email addresses from database for a specific process and vendor.
+        Get recipient email addresses from environment variables or return empty list.
+        TODO: Implement MongoDB-based recipient storage.
         
         Args:
             process_name: Process type (Upload, Validation, Error_Alert, etc.)
@@ -52,38 +51,31 @@ class EmailService:
         Returns:
             List of dictionaries with 'email', 'recipient_name', 'role' keys
         """
-        try:
-            from app.core.database import db_manager
-            with db_manager.get_mysql_connector() as conn:
-                cursor = conn.cursor(dictionary=True)
-            
-            # Get recipients for specific vendor AND 'ALL' vendor (global recipients)
-            query = """
-                SELECT DISTINCT email, recipient_name, role, vendor_name, notification_type
-                FROM email_process_notifications
-                WHERE process_name = %s 
-                  AND (vendor_name = %s OR vendor_name = 'ALL')
-                  AND (notification_type = %s OR notification_type = 'both')
-                  AND is_active = 1
-                ORDER BY 
-                    CASE WHEN vendor_name = %s THEN 0 ELSE 1 END,
-                    role, 
-                    recipient_name
-            """
-            
-                cursor.execute(query, (process_name, vendor_name, notification_type, vendor_name))
-                recipients = cursor.fetchall()
-                
-                logger.info(f"📧 Found {len(recipients)} recipients for process '{process_name}' (vendor: {vendor_name})")
-                return recipients
-            
-        except mysql.connector.Error as e:
-            logger.error(f"❌ Error fetching process recipients: {e}")
-            return []
+        # Get recipients from environment variable (comma-separated emails)
+        env_key = f"EMAIL_RECIPIENTS_{vendor_name.upper()}" if vendor_name != 'ALL' else "EMAIL_RECIPIENTS"
+        recipients_str = os.getenv(env_key, os.getenv("EMAIL_RECIPIENTS", ""))
+        
+        if recipients_str:
+            emails = [email.strip() for email in recipients_str.split(",") if email.strip()]
+            recipients = [
+                {
+                    'email': email,
+                    'recipient_name': email.split('@')[0],
+                    'role': 'Recipient',
+                    'vendor_name': vendor_name,
+                    'notification_type': notification_type
+                }
+                for email in emails
+            ]
+            logger.info(f"📧 Found {len(recipients)} recipients from environment for '{process_name}' (vendor: {vendor_name})")
+            return recipients
+        
+        logger.warning(f"⚠️ No email recipients configured. Set {env_key} or EMAIL_RECIPIENTS environment variable.")
+        return []
     
     def get_recipients_by_vendor(self, vendor_name: str) -> List[Dict[str, str]]:
         """
-        Fetch recipient email addresses from database for a specific vendor.
+        Get recipient email addresses from environment variables.
         DEPRECATED: Use get_recipients_by_process instead.
         
         Args:
@@ -92,56 +84,16 @@ class EmailService:
         Returns:
             List of dictionaries with 'email', 'name', and 'role' keys
         """
-        try:
-            from app.core.database import db_manager
-            with db_manager.get_mysql_connector() as conn:
-                cursor = conn.cursor(dictionary=True)
-            
-                query = """
-                    SELECT email, recipient_name, role, vendor_name
-                    FROM email_recipients
-                    WHERE vendor_name = %s AND is_active = 1
-                    ORDER BY role, recipient_name
-                """
-                
-                cursor.execute(query, (vendor_name,))
-                recipients = cursor.fetchall()
-                
-                logger.info(f"📧 Found {len(recipients)} recipients for vendor '{vendor_name}'")
-                return recipients
-            
-        except mysql.connector.Error as e:
-            logger.error(f"❌ Error fetching email recipients: {e}")
-            return []
+        return self.get_recipients_by_process('Upload', vendor_name, 'both')
     
     def get_all_recipients(self) -> List[Dict[str, str]]:
         """
-        Fetch all active email recipients from database.
+        Get all email recipients from environment variables.
         
         Returns:
             List of dictionaries with 'email', 'name', 'role', and 'vendor_name' keys
         """
-        try:
-            from app.core.database import db_manager
-            with db_manager.get_mysql_connector() as conn:
-                cursor = conn.cursor(dictionary=True)
-            
-                query = """
-                    SELECT email, recipient_name, role, vendor_name
-                    FROM email_recipients
-                    WHERE is_active = 1
-                    ORDER BY vendor_name, role, recipient_name
-                """
-                
-                cursor.execute(query)
-                recipients = cursor.fetchall()
-                
-                logger.info(f"📧 Found {len(recipients)} total active recipients")
-                return recipients
-            
-        except mysql.connector.Error as e:
-            logger.error(f"❌ Error fetching email recipients: {e}")
-            return []
+        return self.get_recipients_by_process('Upload', 'ALL', 'both')
     
     def generate_processing_summary_html(
         self,
@@ -453,16 +405,8 @@ class EmailService:
                         <th>Value</th>
                     </tr>
                     <tr>
-                        <td>Database</td>
-                        <td>{MYSQL_DB}</td>
-                    </tr>
-                    <tr>
-                        <td>Host</td>
-                        <td>{MYSQL_HOST}</td>
-                    </tr>
-                    <tr>
                         <td>Processing Engine</td>
-                        <td>PySpark + MySQL JDBC</td>
+                        <td>File Upload & Storage</td>
                     </tr>
                     <tr>
                         <td>Timestamp</td>
@@ -879,68 +823,10 @@ class EmailService:
             return False
 
 
-def create_email_recipients_table():
-    """
-    Create the email_recipients table in the database if it doesn't exist.
-    This table stores email addresses for each vendor/data source.
-    """
-    try:
-        conn = mysql.connector.connect(
-            host=MYSQL_HOST,
-            port=int(MYSQL_PORT),
-            user=MYSQL_USER,
-            password=MYSQL_PASSWORD,
-            database=MYSQL_DB
-        )
-        cursor = conn.cursor()
-        
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS email_recipients (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            vendor_name VARCHAR(100) NOT NULL COMMENT 'Vendor folder name (Bank_Receipt, TRM_Data, etc.)',
-            email VARCHAR(255) NOT NULL COMMENT 'Recipient email address',
-            recipient_name VARCHAR(255) NOT NULL COMMENT 'Full name of recipient',
-            role VARCHAR(100) DEFAULT 'Stakeholder' COMMENT 'Role (Manager, Analyst, Admin, etc.)',
-            is_active BOOLEAN DEFAULT TRUE COMMENT 'Whether to send emails to this recipient',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            UNIQUE KEY unique_vendor_email (vendor_name, email),
-            INDEX idx_vendor (vendor_name),
-            INDEX idx_active (is_active)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Email recipients for data processing notifications';
-        """
-        
-                cursor.execute(create_table_query)
-                conn.commit()
-                
-                logger.info("✅ Email recipients table created/verified successfully")
-                
-                # Insert sample data if table is empty
-                cursor.execute("SELECT COUNT(*) FROM email_recipients")
-                count = cursor.fetchone()[0]
-                
-                if count == 0:
-                    sample_data = """
-                    INSERT INTO email_recipients (vendor_name, email, recipient_name, role) VALUES
-                    ('Bank_Receipt', 'finance.manager@company.com', 'Finance Manager', 'Manager'),
-                    ('Bank_Receipt', 'accounts@company.com', 'Accounts Team', 'Analyst'),
-                    ('TRM_Data', 'operations@company.com', 'Operations Team', 'Manager'),
-                    ('TRM_Data', 'data.analyst@company.com', 'Data Analyst', 'Analyst'),
-                    ('MPR_UPI', 'payments@company.com', 'Payments Team', 'Manager'),
-                    ('MPR_Card', 'payments@company.com', 'Payments Team', 'Manager'),
-                    ('POS_Data', 'pos.manager@company.com', 'POS Manager', 'Manager'),
-                    ('POS_Data', 'store.ops@company.com', 'Store Operations', 'Analyst'),
-                    ('ALL', 'admin@company.com', 'System Admin', 'Admin')
-                    """
-                    cursor.execute(sample_data)
-                    conn.commit()
-                    logger.info("✅ Inserted sample email recipients")
-                
-                return True
-        
-    except mysql.connector.Error as e:
-        logger.error(f"❌ Error creating email_recipients table: {e}")
-        return False
+# Note: Email recipients are now configured via environment variables
+# Set EMAIL_RECIPIENTS or EMAIL_RECIPIENTS_{VENDOR} environment variables
+# Example: EMAIL_RECIPIENTS=admin@company.com,user@company.com
+#          EMAIL_RECIPIENTS_ZOMATO=zomato@company.com
 
     def generate_upload_summary_html(self, summary: Dict) -> str:
         """
@@ -1216,8 +1102,8 @@ if __name__ == "__main__":
     print("🔧 Setting up Email Service...")
     print("=" * 60)
     
-    # Create tables
-    create_email_recipients_table()
+    # Note: Email recipients are configured via environment variables
+    # Set EMAIL_RECIPIENTS or EMAIL_RECIPIENTS_{VENDOR} environment variables
     
     # Test email service
     email_service = EmailService()

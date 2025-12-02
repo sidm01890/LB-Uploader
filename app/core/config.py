@@ -29,34 +29,8 @@ def _is_prod():
     return _get_current_env().is_production
 
 
-class DatabaseConfig(BaseSettings):
-    """Database configuration with validation"""
-    
-    host: str = Field(..., validation_alias="MYSQL_HOST")
-    port: int = Field(3306, validation_alias="MYSQL_PORT")
-    user: str = Field(..., validation_alias="MYSQL_USER")
-    password: str = Field(..., validation_alias="MYSQL_PASSWORD")
-    database: str = Field(..., validation_alias="MYSQL_DB")
-    
-    @field_validator('password')
-    @classmethod
-    def password_not_hardcoded(cls, v):
-        """Ensure password is not hardcoded"""
-        # Allow default passwords in dev environment
-        if os.getenv('ALLOW_DEFAULT_PASSWORD') == 'true' or os.getenv('APP_ENV') == 'dev':
-            return v
-        if v and (v == '123!' or len(v) < 8):
-            raise ValueError(
-                "Weak password detected! "
-                "Use environment variable MYSQL_PASSWORD with a strong password."
-            )
-        return v
-    
-    model_config = SettingsConfigDict(
-        # Properties files are loaded via properties_loader
-        # Environment variables take precedence
-        case_sensitive=False
-    )
+# DatabaseConfig removed - using MongoDB now
+# MongoDB connection will be configured separately
 
 
 class EmailConfig(BaseSettings):
@@ -143,7 +117,7 @@ class AppConfig(BaseSettings):
     environment: Environment = Field(default_factory=get_environment, env="APP_ENV")
     
     # Core services (lazy instantiation to ensure properties are loaded first)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    # database: DatabaseConfig removed - using MongoDB now
     email: EmailConfig = Field(default_factory=EmailConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
@@ -216,11 +190,7 @@ class AppConfig(BaseSettings):
 config = AppConfig()
 
 # Backward compatibility - expose individual configs at module level
-MYSQL_HOST = config.database.host
-MYSQL_PORT = config.database.port
-MYSQL_USER = config.database.user
-MYSQL_PASSWORD = config.database.password
-MYSQL_DB = config.database.database
+# MySQL configs removed - using MongoDB now
 
 OPENAI_API_KEY = config.openai.api_key
 MODEL_NAME = config.openai.model

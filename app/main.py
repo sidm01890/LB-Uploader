@@ -17,39 +17,27 @@ setup_logging(config.log_level)
 async def lifespan(app: FastAPI):
     # Startup
     env = get_environment()
-    logging.info(f"Financial Reconciliation Platform API starting up...")
+    logging.info(f"File Upload Service API starting up...")
     logging.info(f"Environment: {env.value.upper()}")
     if config.enable_docs:
         logging.info("API Documentation available at /docs")
     
-    # Initialize automation system if available
-    try:
-        from app.automation.job_manager import startup_job_manager
-        await startup_job_manager()
-        logging.info("✅ Automation system initialized")
-    except Exception as e:
-        logging.warning(f"⚠️ Automation system initialization failed: {e}")
+    # Automation system removed - only file upload functionality is available
     
     yield
     
     # Shutdown
-    logging.info("Smart Column Mapper API shutting down...")
+    logging.info("File Upload Service API shutting down...")
     
-    # Shutdown automation system if available
-    try:
-        from app.automation.job_manager import shutdown_job_manager
-        await shutdown_job_manager()
-        logging.info("Automation system stopped")
-    except Exception as e:
-        logging.warning(f"Automation system shutdown failed: {e}")
+    # Automation system removed - only file upload functionality is available
 
 # Determine docs URLs based on environment
 docs_url = "/docs" if config.enable_docs else None
 redoc_url = "/redoc" if config.enable_docs else None
 
 app = FastAPI(
-    title="Financial Reconciliation Platform API",
-    description="AI-powered financial reconciliation and intelligent column mapping service for restaurant operations",
+    title="File Upload Service API",
+    description="Service for uploading Excel/CSV files and storing them on the server for further processing",
     version="2.0.0",
     docs_url=docs_url,
     redoc_url=redoc_url,
@@ -81,7 +69,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 class UploadTimeoutMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Disable buffering for upload endpoints to allow streaming
-        if request.url.path.startswith(("/devyani-service/api/upload", "/api/uploader/upload")):
+        if request.url.path.startswith("/api/upload"):
             response = await call_next(request)
             response.headers["X-Accel-Buffering"] = "no"  # Disable nginx buffering
             return response
@@ -156,38 +144,10 @@ async def general_exception_handler(request: Request, exc: Exception):
     )
 
 # Include routers
-app.include_router(router, prefix="/api", tags=["Smart Uploader"])
+# All routes are now in routes.py
+from app.routes import router
 
-# Include devyani-style upload routes
-try:
-    from app.routes_devyani import router as devyani_router, alias_router
-    app.include_router(devyani_router)
-    app.include_router(alias_router)  # Add alias routes for frontend compatibility
-    logging.info("✅ Devyani-style upload endpoints loaded successfully")
-except ImportError as e:
-    logging.warning(f"⚠️ Devyani-style upload endpoints not available: {e}")
-
-# Include automation routers
-try:
-    from app.automation.routes import automation_router
-    from app.automation.job_routes import jobs_router
-    
-    app.include_router(automation_router, tags=["Automation"])
-    app.include_router(jobs_router, tags=["Scheduled Jobs"])
-    
-    logging.info("✅ Automation endpoints loaded successfully")
-except ImportError as e:
-    logging.warning(f"⚠️ Automation endpoints not available: {e}")
-
-# Include financial reconciliation routers
-try:
-    from app.financial_routes import financial_router
-    
-    app.include_router(financial_router, prefix="/api", tags=["Financial Reconciliation"])
-    
-    logging.info("✅ Financial reconciliation endpoints loaded successfully")
-except ImportError as e:
-    logging.warning(f"⚠️ Financial reconciliation endpoints not available: {e}")
+app.include_router(router, prefix="/api", tags=["File Upload"])
 
 # Lifespan events handled above in the lifespan function
 
