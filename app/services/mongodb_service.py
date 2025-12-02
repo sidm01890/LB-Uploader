@@ -575,6 +575,92 @@ class MongoDBService:
             logger.error(f"❌ Error listing field mappings: {e}")
             return []
     
+    def save_excel_data_row_wise(
+        self,
+        collection_name: str,
+        row_data: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Save Excel data in row-wise format to MongoDB collection.
+        Each row becomes a separate document in the collection.
+        Collection name will be converted to lowercase.
+        
+        Args:
+            collection_name: Name of the collection (will be converted to lowercase)
+            row_data: List of dictionaries where each dictionary represents a row
+                     Example: [{"Order ID": 123, "Amount": 100}, {"Order ID": 456, "Amount": 200}]
+            
+        Returns:
+            Dictionary with status and insertion details
+        """
+        if not self.is_connected():
+            logger.warning("⚠️ MongoDB not connected, skipping data save")
+            return {
+                "success": False,
+                "message": "MongoDB not connected",
+                "rows_inserted": 0
+            }
+        
+        try:
+            # Convert collection name to lowercase
+            collection_name_lower = collection_name.lower()
+            collection = self.db[collection_name_lower]
+            
+            # Drop upload_id index if it exists (since our row documents don't use upload_id)
+            try:
+                # Check if index exists and drop it
+                indexes = list(collection.list_indexes())
+                for index in indexes:
+                    index_keys = index.get('key', {})
+                    if 'upload_id' in index_keys:
+                        index_name = index.get('name', 'upload_id_1')
+                        collection.drop_index(index_name)
+                        logger.info(f"✅ Dropped upload_id index '{index_name}' from collection '{collection_name_lower}'")
+            except Exception as index_error:
+                # Index might not exist or already dropped, which is fine
+                logger.debug(f"Index check for '{collection_name_lower}': {index_error}")
+            
+            # Create separate document for each row
+            current_time = datetime.utcnow()
+            documents = []
+            
+            for row in row_data:
+                # Each row becomes a separate document
+                # Add timestamps to each row document
+                document = dict(row)  # Create a copy of the row
+                document["created_at"] = current_time
+                document["updated_at"] = current_time
+                documents.append(document)
+            
+            # Insert all documents
+            if documents:
+                result = collection.insert_many(documents)
+                rows_inserted = len(result.inserted_ids)
+                
+                logger.info(f"✅ Saved {rows_inserted} row documents to MongoDB collection '{collection_name_lower}'")
+                return {
+                    "success": True,
+                    "message": f"Successfully saved {rows_inserted} row documents to collection '{collection_name_lower}'",
+                    "rows_inserted": rows_inserted,
+                    "columns_count": len(row_data[0]) if row_data else 0,
+                    "collection_name": collection_name_lower
+                }
+            else:
+                logger.warning(f"⚠️ No documents to insert into collection '{collection_name_lower}'")
+                return {
+                    "success": False,
+                    "message": "No documents to insert",
+                    "rows_inserted": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Error saving Excel data to MongoDB collection '{collection_name}': {e}")
+            return {
+                "success": False,
+                "message": f"Error saving data: {str(e)}",
+                "rows_inserted": 0
+            }
+    
     def close(self):
         """Close MongoDB connection"""
         if self.client is not None:
