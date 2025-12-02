@@ -1,0 +1,114 @@
+# Core FastAPI and Web Framework
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
+pyyaml>=6.0.0
+
+# Data Processing - Core
+pandas>=2.2.0
+numpy>=1.24.0
+openpyxl>=3.1.2
+xlrd>=2.0.1
+
+# PySpark and Big Data Processing
+pyspark>=3.5.0
+delta-spark>=3.0.0
+py4j>=0.10.9
+pyarrow>=14.0.0
+
+# AI and Machine Learning
+openai>=1.3.0
+scikit-learn>=1.3.0
+transformers>=4.30.0
+torch>=2.0.0
+sentence-transformers>=2.2.0
+
+# Database Connectors
+mysql-connector-python>=8.2.0
+sqlalchemy>=2.0.23
+psycopg2-binary>=2.9.0  # PostgreSQL
+pymongo>=4.0.0          # MongoDB
+elasticsearch>=8.0.0     # Elasticsearch
+redis>=4.5.0            # Redis for caching
+
+# Cloud Storage and Services
+boto3>=1.26.0           # AWS S3
+azure-storage-blob>=12.0.0  # Azure Blob Storage
+google-cloud-storage>=2.10.0  # Google Cloud Storage
+
+# Data Quality and Validation
+great-expectations>=0.17.0
+cerberus>=1.3.4
+marshmallow>=3.20.0
+
+# Performance and Monitoring
+prometheus-client>=0.16.0
+structlog>=23.1.0
+psutil>=5.9.0
+memory-profiler>=0.60.0
+
+# Distributed Computing and Kubernetes
+kubernetes>=26.1.0
+celery>=5.3.0
+flower>=2.0.0
+
+# Security and Authentication
+cryptography>=41.0.0
+pyjwt>=2.8.0
+passlib>=1.7.4
+python-jose>=3.3.0
+
+# Data Serialization and Formats
+msgpack>=1.0.5
+orjson>=3.9.0
+avro-python3>=1.10.0
+
+# Stream Processing
+kafka-python>=2.0.2
+confluent-kafka>=2.1.1
+
+# Automation and Scheduling
+schedule>=1.2.0
+paramiko>=3.4.0            # SFTP/SSH connections
+imaplib2>=3.6              # Enhanced IMAP support
+jinja2>=3.1.2              # Email templating
+croniter>=1.4.1            # Cron expression parsing
+apscheduler>=3.10.4        # Advanced Python Scheduler
+
+# Email Processing
+email-validator>=2.1.0
+dnspython>=2.4.2
+
+# File Compression and Archives
+zipfile38>=0.0.3           # Enhanced zip support
+rarfile>=4.0              # RAR archive support
+py7zr>=0.20.0             # 7-Zip support
+
+# Testing and Development
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+pytest-cov>=4.1.0
+pytest-playwright>=0.4.3  # Playwright integration for pytest
+playwright>=1.40.0         # Browser automation framework
+httpx>=0.25.2
+requests>=2.31.0           # HTTP client for API examples
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+
+# Documentation
+sphinx>=7.0.0
+sphinx-rtd-theme>=1.3.0
+
+# Optional Dependencies for Enhanced Features
+# Uncomment as needed:
+# dask[complete]>=2023.5.0     # Alternative to Spark for medium data
+# modin[all]>=0.20.0           # Pandas acceleration
+# cudf>=23.06.0                # GPU-accelerated DataFrames
+# rapids-cuml>=23.06.0         # GPU ML libraries
+# jupyter>=1.0.0               # For data exploration
+# plotly>=5.15.0               # Interactive visualizations
+# streamlit>=1.25.0            # Quick dashboards
+

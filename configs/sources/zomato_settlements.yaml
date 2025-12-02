@@ -1,0 +1,68 @@
+# configs/sources/zomato_settlements.yaml
+source_id: platform_zomato_settlements
+source_name: "Zomato Settlement Reports"
+mode: sftp        # sftp | folder | email | api
+location:
+  sftp:
+    host: settlements.zomato.com
+    port: 22
+    username: "${ZOMATO_SFTP_USER}"
+    password: "${ZOMATO_SFTP_PASS}"
+    remote_dir: /partner/settlements
+    key_file: "configs/keys/zomato_sftp.pem"
+file_pattern: "zomato_settlement_*.{xlsx,csv}"
+entity: payment              # target canonical entity
+delimiter: ","                      # for CSV
+header_rows: 1
+encoding: "utf-8"
+date_format_hints: ["dd-MM-yyyy", "yyyy-MM-dd", "dd/MM/yy"]
+amount_locale: "en_IN"              # grouping, decimals
+ai_mapping:
+  enabled: true
+  model: "gpt-4o-mini"             # or local LLM
+  temperature: 0.1
+  few_shots_ref: "payment_zomato"  # references cfg_mapping_examples
+  forced_mappings:
+    "Order ID": "payment_ref"
+    "Settlement Amount": "amount"
+    "UTR Number": "settlement_batch_id"
+    "Settlement Date": "settlement_date"
+    "Restaurant ID": "merchant_id"
+dq_rules:
+  require_columns: ["payment_ref","amount","settlement_date"]
+  non_null: ["payment_ref","amount"]
+  valid_range:
+    amount: { min: 0, max: 50000 }
+    settlement_date: { min_date: "2020-01-01", max_date: "today+1" }
+  enum_sets:
+    status: ["SETTLED","PENDING","FAILED"]
+  business_rules:
+    - name: "commission_validation"
+      description: "Validate commission calculation"
+      rule: "gross_amount - amount <= gross_amount * 0.30"  # Max 30% commission
+load:
+  target_table: "fin_payments"
+  dedupe_keys: ["payment_ref","settlement_date"]
+  upsert_key: ["payment_ref"]
+  batch_size: 5000
+  parallel_loading: true
+notifications:
+  on_stages: ["INGESTED","VALIDATED","LOADED","RECON_COMPLETE","EXCEPTIONS"]
+  email_to: ["ops@restaurant.com","finance@restaurant.com"]
+  webhook_url: "https://api.restaurant.com/webhooks/zomato-settlement"
+  slack_channel: "#finance-ops"
+recon:
+  join_with: "fin_bank_statements"
+  ruleset: "zomato_bank_settlement"
+  auto_run: true
+  schedule: "*/30 * * * *"  # Every 30 minutes after ingestion
+monitoring:
+  sla_minutes: 120  # Expected completion within 2 hours
+  alert_thresholds:
+    exception_rate: 0.05  # Alert if >5% exceptions
+    amount_variance: 10000  # Alert if variance >₹10k
+    processing_time: 90  # Alert if processing >90 minutes
+schedule:
+  cron: "0 8 * * *"  # Daily at 8 AM
+  timezone: "Asia/Kolkata"
+  depends_on: ["bank_hdfc_ca"]  # Wait for bank data first
