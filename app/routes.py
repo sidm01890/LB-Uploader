@@ -682,6 +682,628 @@ async def list_all_field_mappings():
 
 
 # ============================================================================
+# REPORT FORMULAS ROUTES
+# ============================================================================
+
+class FormulaItem(BaseModel):
+    """Model for a single formula"""
+    formula_name: str = Field(
+        ...,
+        description="Name of the formula",
+        example="pos_order_id"
+    )
+    formula_value: str = Field(
+        ...,
+        description="Formula expression/value",
+        example="pos.order_id"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "formula_name": "pos_order_id",
+                "formula_value": "pos.order_id"
+            }
+        }
+
+
+class SaveReportFormulasRequest(BaseModel):
+    """Request model for saving report formulas"""
+    report_name: str = Field(
+        ...,
+        description="Name of the report (will be used as collection name, converted to lowercase)",
+        example="zomato_vs_pos_summary",
+        min_length=1
+    )
+    formulas: List[FormulaItem] = Field(
+        ...,
+        description="List of formulas with formula_name and formula_value",
+        min_items=1
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "report_name": "zomato_vs_pos_summary",
+                "formulas": [
+                    {
+                        "formula_name": "pos_order_id",
+                        "formula_value": "pos.order_id"
+                    },
+                    {
+                        "formula_name": "zomato_order_id",
+                        "formula_value": "zomato.order_id"
+                    },
+                    {
+                        "formula_name": "pos_net_amount",
+                        "formula_value": "pos.net_amount"
+                    },
+                    {
+                        "formula_name": "zomato_net_amount",
+                        "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                    }
+                ]
+            }
+        }
+
+
+class SaveReportFormulasResponse(BaseModel):
+    """Response model for saving report formulas"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Report formulas created successfully in collection 'zomato_vs_pos_summary'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "report_name": "zomato_vs_pos_summary",
+            "formulas_count": 4,
+            "formulas": [
+                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+            ],
+            "collection_existed": False,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.post(
+    "/uploader/reports/formulas",
+    tags=["Report Formulas"],
+    summary="Save report formulas",
+    description="Save report formulas to a MongoDB collection. If the collection doesn't exist, it will be created automatically. If it exists, the formulas will be updated.",
+    response_model=SaveReportFormulasResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Report formulas saved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Report formulas created successfully in collection 'zomato_vs_pos_summary'",
+                        "data": {
+                            "report_name": "zomato_vs_pos_summary",
+                            "formulas_count": 4,
+                            "formulas": [
+                                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"},
+                                {"formula_name": "pos_net_amount", "formula_value": "pos.net_amount"},
+                                {"formula_name": "zomato_net_amount", "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"}
+                            ],
+                            "collection_existed": False,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Invalid request",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "At least one formula is required"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def save_report_formulas(request: SaveReportFormulasRequest = Body(...)):
+    """
+    Save report formulas to a MongoDB collection.
+    
+    **Features:**
+    - Automatically creates the collection if it doesn't exist
+    - Updates existing formulas if the collection already exists
+    - Report name is converted to lowercase and used as collection name
+    - Validates that all formulas have required fields
+    
+    **Request Body:**
+    ```json
+    {
+        "report_name": "zomato_vs_pos_summary",
+        "formulas": [
+            {
+                "formula_name": "pos_order_id",
+                "formula_value": "pos.order_id"
+            },
+            {
+                "formula_name": "zomato_order_id",
+                "formula_value": "zomato.order_id"
+            },
+            {
+                "formula_name": "pos_net_amount",
+                "formula_value": "pos.net_amount"
+            },
+            {
+                "formula_name": "zomato_net_amount",
+                "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+            }
+        ]
+    }
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Report formulas created successfully in collection 'zomato_vs_pos_summary'",
+        "data": {
+            "report_name": "zomato_vs_pos_summary",
+            "formulas_count": 4,
+            "formulas": [...],
+            "collection_existed": false,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **400 Bad Request**: Invalid request or missing required fields
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    """
+    # Convert FormulaItem objects to dictionaries
+    formulas_dict = [
+        {"formula_name": f.formula_name, "formula_value": f.formula_value}
+        for f in request.formulas
+    ]
+    
+    return await db_setup_controller.save_report_formulas(
+        request.report_name,
+        formulas_dict
+    )
+
+
+class GetReportFormulasResponse(BaseModel):
+    """Response model for getting report formulas"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Report formulas retrieved successfully")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "report_name": "zomato_vs_pos_summary",
+            "formulas": [
+                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+            ],
+            "formulas_count": 4,
+            "created_at": "2024-01-01T12:00:00",
+            "updated_at": "2024-01-01T12:00:00",
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.get(
+    "/uploader/reports/{report_name}",
+    tags=["Report Formulas"],
+    summary="Get report formulas",
+    description="Retrieve all formulas for a specific report collection.",
+    response_model=GetReportFormulasResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Report formulas retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Report formulas retrieved successfully",
+                        "data": {
+                            "report_name": "zomato_vs_pos_summary",
+                            "formulas": [
+                                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"},
+                                {"formula_name": "pos_net_amount", "formula_value": "pos.net_amount"},
+                                {"formula_name": "zomato_net_amount", "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"}
+                            ],
+                            "formulas_count": 4,
+                            "created_at": "2024-01-15T10:30:00.123456",
+                            "updated_at": "2024-01-15T10:30:00.123456",
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Report collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Report collection 'zomato_vs_pos_summary' does not exist"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_report_formulas(report_name: str):
+    """
+    Get report formulas by report name.
+    
+    **Features:**
+    - Retrieves all formulas for a specific report collection
+    - Returns formulas, timestamps, and metadata
+    - Report name is converted to lowercase
+    
+    **Example:**
+    ```
+    GET /api/uploader/reports/zomato_vs_pos_summary
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Report formulas retrieved successfully",
+        "data": {
+            "report_name": "zomato_vs_pos_summary",
+            "formulas": [
+                {
+                    "formula_name": "pos_order_id",
+                    "formula_value": "pos.order_id"
+                },
+                {
+                    "formula_name": "zomato_order_id",
+                    "formula_value": "zomato.order_id"
+                },
+                {
+                    "formula_name": "pos_net_amount",
+                    "formula_value": "pos.net_amount"
+                },
+                {
+                    "formula_name": "zomato_net_amount",
+                    "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                }
+            ],
+            "formulas_count": 4,
+            "created_at": "2024-01-15T10:30:00.123456",
+            "updated_at": "2024-01-15T10:30:00.123456",
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **404 Not Found**: Collection or document doesn't exist
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    """
+    return await db_setup_controller.get_report_formulas(report_name)
+
+
+class UpdateReportFormulasRequest(BaseModel):
+    """Request model for updating report formulas"""
+    formulas: List[FormulaItem] = Field(
+        ...,
+        description="List of formulas with formula_name and formula_value",
+        min_items=1
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "formulas": [
+                    {
+                        "formula_name": "pos_order_id",
+                        "formula_value": "pos.order_id"
+                    },
+                    {
+                        "formula_name": "zomato_order_id",
+                        "formula_value": "zomato.order_id"
+                    },
+                    {
+                        "formula_name": "pos_net_amount",
+                        "formula_value": "pos.net_amount"
+                    },
+                    {
+                        "formula_name": "zomato_net_amount",
+                        "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                    }
+                ]
+            }
+        }
+
+
+class UpdateReportFormulasResponse(BaseModel):
+    """Response model for updating report formulas"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Report formulas updated successfully in collection 'zomato_vs_pos_summary'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "report_name": "zomato_vs_pos_summary",
+            "formulas_count": 4,
+            "formulas": [
+                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+            ],
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.put(
+    "/uploader/reports/{report_name}/formulas",
+    tags=["Report Formulas"],
+    summary="Update report formulas",
+    description="Update report formulas in an existing MongoDB collection. The collection must exist. This will replace all existing formulas with the new set.",
+    response_model=UpdateReportFormulasResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Report formulas updated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Report formulas updated successfully in collection 'zomato_vs_pos_summary'",
+                        "data": {
+                            "report_name": "zomato_vs_pos_summary",
+                            "formulas_count": 4,
+                            "formulas": [
+                                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"},
+                                {"formula_name": "pos_net_amount", "formula_value": "pos.net_amount"},
+                                {"formula_name": "zomato_net_amount", "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"}
+                            ],
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Invalid request",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "At least one formula is required"
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Report collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Report collection 'zomato_vs_pos_summary' does not exist"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def update_report_formulas(
+    report_name: str,
+    request: UpdateReportFormulasRequest = Body(...)
+):
+    """
+    Update report formulas in an existing MongoDB collection.
+    
+    **Features:**
+    - Updates formulas in an existing collection (collection must exist)
+    - Replaces all existing formulas with the new set
+    - Report name is converted to lowercase
+    - Validates that all formulas have required fields
+    - Updates the `updated_at` timestamp
+    
+    **Request Body:**
+    ```json
+    {
+        "formulas": [
+            {
+                "formula_name": "pos_order_id",
+                "formula_value": "pos.order_id"
+            },
+            {
+                "formula_name": "zomato_order_id",
+                "formula_value": "zomato.order_id"
+            },
+            {
+                "formula_name": "pos_net_amount",
+                "formula_value": "pos.net_amount"
+            },
+            {
+                "formula_name": "zomato_net_amount",
+                "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+            }
+        ]
+    }
+    ```
+    
+    **Example:**
+    ```
+    PUT /api/uploader/reports/zomato_vs_pos_summary/formulas
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Report formulas updated successfully in collection 'zomato_vs_pos_summary'",
+        "data": {
+            "report_name": "zomato_vs_pos_summary",
+            "formulas_count": 4,
+            "formulas": [...],
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **400 Bad Request**: Invalid request or missing required fields
+    - **404 Not Found**: Collection or document doesn't exist
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    
+    **Note:** This endpoint requires the collection to exist. Use the POST endpoint to create a new report collection.
+    """
+    # Convert FormulaItem objects to dictionaries
+    formulas_dict = [
+        {"formula_name": f.formula_name, "formula_value": f.formula_value}
+        for f in request.formulas
+    ]
+    
+    return await db_setup_controller.update_report_formulas(
+        report_name,
+        formulas_dict
+    )
+
+
+class DeleteReportResponse(BaseModel):
+    """Response model for deleting report collection"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Collection 'zomato_vs_pos_summary' deleted successfully")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "report_name": "zomato_vs_pos_summary",
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.delete(
+    "/uploader/reports/{report_name}",
+    tags=["Report Formulas"],
+    summary="Delete report collection",
+    description="Delete a report collection from MongoDB. This will permanently delete the collection and all its data.",
+    response_model=DeleteReportResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Report collection deleted successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Collection 'zomato_vs_pos_summary' deleted successfully",
+                        "data": {
+                            "report_name": "zomato_vs_pos_summary",
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Report collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato_vs_pos_summary' does not exist"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def delete_report_collection(report_name: str):
+    """
+    Delete a report collection from MongoDB.
+    
+    **Features:**
+    - Permanently deletes the collection and all its data
+    - Report name is converted to lowercase
+    - Returns error if collection doesn't exist
+    
+    **Example:**
+    ```
+    DELETE /api/uploader/reports/zomato_vs_pos_summary
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Collection 'zomato_vs_pos_summary' deleted successfully",
+        "data": {
+            "report_name": "zomato_vs_pos_summary",
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **404 Not Found**: Collection doesn't exist
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    
+    **Warning:** This operation is irreversible. All data in the collection will be permanently deleted.
+    """
+    return await db_setup_controller.delete_report_collection(report_name)
+
+
+# ============================================================================
 # HEALTH CHECK ROUTES
 # ============================================================================
 
