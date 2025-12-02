@@ -131,14 +131,20 @@ class CreateCollectionRequest(BaseModel):
     collection_name: str = Field(
         ...,
         description="Name of the collection to create (will be converted to lowercase)",
-        example="Zomato",
+        example="zomato",
         min_length=1
+    )
+    unique_ids: List[str] = Field(
+        default_factory=list,
+        description="List of field names that form unique identifiers for this collection (can be empty array)",
+        example=["order_id", "order_date"]
     )
     
     class Config:
         json_schema_extra = {
             "example": {
-                "collection_name": "Zomato"
+                "collection_name": "zomato",
+                "unique_ids": ["order_id", "order_date"]
             }
         }
 
@@ -146,12 +152,14 @@ class CreateCollectionRequest(BaseModel):
 class CreateCollectionResponse(BaseModel):
     """Response model for collection creation"""
     status: int = Field(..., description="HTTP status code", example=200)
-    message: str = Field(..., description="Response message", example="Collection 'zomato' created successfully")
+    message: str = Field(..., description="Response message", example="Collection 'zomato' and processed collection 'zomato_processed' created successfully")
     data: Dict[str, Any] = Field(
         ...,
         description="Response data",
         example={
             "collection_name": "zomato",
+            "processed_collection_name": "zomato_processed",
+            "unique_ids": ["order_id", "order_date"],
             "mongodb_connected": True
         }
     )
@@ -214,28 +222,41 @@ async def create_collection(request: CreateCollectionRequest = Body(...)):
     **Request Body:**
     ```json
     {
-        "collection_name": "Zomato"
+        "collection_name": "zomato",
+        "unique_ids": ["order_id", "order_date"]
     }
     ```
+    
+    **Note:** `unique_ids` is optional and can be an empty array `[]`.
     
     **Success Response (200):**
     ```json
     {
         "status": 200,
-        "message": "Collection 'zomato' created successfully",
+        "message": "Collection 'zomato' and processed collection 'zomato_processed' created successfully",
         "data": {
             "collection_name": "zomato",
+            "processed_collection_name": "zomato_processed",
+            "unique_ids": ["order_id", "order_date"],
             "mongodb_connected": true
         }
     }
     ```
+    
+    **Features:**
+    - Automatically creates both the main collection and a processed version (e.g., `zomato` → `zomato_processed`)
+    - Stores unique_ids for later use in deduplication/processing
+    - Both collections are created even if unique_ids is empty
     
     **Error Responses:**
     - **409 Conflict**: Collection already exists
     - **503 Service Unavailable**: MongoDB not connected
     - **500 Internal Server Error**: Other errors
     """
-    return await db_setup_controller.create_collection(request.collection_name)
+    return await db_setup_controller.create_collection(
+        request.collection_name,
+        request.unique_ids
+    )
 
 
 class ListCollectionsResponse(BaseModel):
@@ -257,7 +278,7 @@ class ListCollectionsResponse(BaseModel):
     "/uploader/setup/collections",
     tags=["Database Setup"],
     summary="List all MongoDB collections",
-    description="Get a list of all collection names in the MongoDB database. Returns an empty array if no collections exist or if MongoDB is not connected.",
+    description="Get a list of all collection names from the raw_data_collection. Only collections created via the API are included. Returns an empty array if no collections exist or if MongoDB is not connected.",
     response_model=ListCollectionsResponse,
     status_code=status.HTTP_200_OK,
     responses={
@@ -291,13 +312,13 @@ class ListCollectionsResponse(BaseModel):
 )
 async def list_all_collections():
     """
-    Get all MongoDB collection names.
+    Get all MongoDB collection names from raw_data_collection.
     
     **Features:**
-    - Returns all collection names in the database
+    - Returns only collections that were created via the API (stored in raw_data_collection)
     - Collections are returned in alphabetical order
-    - System collections (starting with "system.") are excluded
     - Returns empty array if no collections exist or MongoDB is not connected
+    - Only collections created through `/uploader/setup/new` endpoint are included
     
     **Success Response (200):**
     ```json
@@ -312,11 +333,352 @@ async def list_all_collections():
     }
     ```
     
-    **Note:** The actual response will reflect the current collections in your MongoDB database.
+    **Note:** This endpoint only returns collections that were created via the API and are registered in `raw_data_collection`. Collections created manually or outside the API will not appear in this list.
     
     **Note:** If MongoDB is not connected, the `collections` array will be empty and `mongodb_connected` will be `false`.
     """
     return await db_setup_controller.list_all_collections()
+
+
+class GetCollectionKeysRequest(BaseModel):
+    """Request model for getting collection keys"""
+    collection_name: str = Field(
+        ...,
+        description="Name of the collection to get keys from (will be converted to lowercase)",
+        example="zomato",
+        min_length=1
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "collection_name": "zomato"
+            }
+        }
+
+
+class GetCollectionKeysResponse(BaseModel):
+    """Response model for collection keys"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Found 5 unique key(s) in collection 'zomato'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collection_name": "zomato",
+            "keys": ["order_id", "order_amount", "store_code"],
+            "count": 3,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.post(
+    "/uploader/setup/collection/keys",
+    tags=["Database Setup"],
+    summary="Get unique keys from a collection",
+    description="Get a list of all unique keys/fields from documents in a MongoDB collection. Excludes system fields (_id, created_at, updated_at).",
+    response_model=GetCollectionKeysResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Collection keys retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Found 5 unique key(s) in collection 'zomato'",
+                        "data": {
+                            "collection_name": "zomato",
+                            "keys": ["order_id", "order_amount", "store_code", "order_date", "customer_name"],
+                            "count": 5,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato' does not exist"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_collection_keys(request: GetCollectionKeysRequest = Body(...)):
+    """
+    Get unique keys from a MongoDB collection.
+    
+    **Features:**
+    - Returns all unique keys/fields found in documents of the specified collection
+    - Automatically excludes system fields: `_id`, `created_at`, `updated_at`
+    - Collection name is converted to lowercase
+    - Keys are returned in alphabetical order
+    - Analyzes up to 1000 documents to extract keys
+    
+    **Request Body:**
+    ```json
+    {
+        "collection_name": "zomato"
+    }
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Found 5 unique key(s) in collection 'zomato'",
+        "data": {
+            "collection_name": "zomato",
+            "keys": ["order_id", "order_amount", "store_code", "order_date", "customer_name"],
+            "count": 5,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **404 Not Found**: Collection doesn't exist
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    
+    **Note:** The keys are extracted from the first 1000 documents in the collection. If your collection has varying schemas, make sure the sample documents represent all possible keys.
+    """
+    return await db_setup_controller.get_collection_keys(request.collection_name)
+
+
+# ============================================================================
+# COLLECTION FIELD MAPPING ROUTES
+# ============================================================================
+
+class SaveFieldMappingRequest(BaseModel):
+    """Request model for saving field mapping"""
+    collection_name: str = Field(
+        ...,
+        description="Name of the collection (will be converted to lowercase)",
+        example="zomato",
+        min_length=1
+    )
+    selected_fields: List[str] = Field(
+        ...,
+        description="List of field names to use for this collection",
+        example=["order_id", "order_amount", "store_code", "order_date"],
+        min_items=1
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "collection_name": "zomato",
+                "selected_fields": ["order_id", "order_amount", "store_code", "order_date", "customer_name"]
+            }
+        }
+
+
+class SaveFieldMappingResponse(BaseModel):
+    """Response model for saving field mapping"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Field mapping created successfully for collection 'zomato'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collection_name": "zomato",
+            "selected_fields": ["order_id", "order_amount", "store_code"],
+            "selected_fields_count": 3,
+            "total_available_fields": 50,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.post(
+    "/uploader/setup/collection/fields",
+    tags=["Database Setup"],
+    summary="Save field mapping for a collection",
+    description="Save or update which fields to use from a collection. For example, if zomato has 50 columns but you only want 15, specify those 15 fields here.",
+    response_model=SaveFieldMappingResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Field mapping saved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Field mapping created successfully for collection 'zomato'",
+                        "data": {
+                            "collection_name": "zomato",
+                            "selected_fields": ["order_id", "order_amount", "store_code", "order_date"],
+                            "selected_fields_count": 4,
+                            "total_available_fields": 50,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        400: {
+            "description": "Invalid request or fields don't exist in collection",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Invalid fields for collection 'zomato': invalid_field. Available fields: order_id, order_amount, store_code"
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato' does not exist"
+                    }
+                }
+            }
+        }
+    }
+)
+async def save_collection_field_mapping(request: SaveFieldMappingRequest = Body(...)):
+    """
+    Save or update field mapping for a collection.
+    
+    **Use Case:**
+    - If a collection (e.g., zomato) has 50 columns but you only need 15, use this API to specify which 15 fields to use.
+    - The mapping is stored in `collection_field_mappings` collection.
+    - If a mapping already exists, it will be updated.
+    
+    **Features:**
+    - Validates that all selected fields exist in the collection
+    - Automatically converts collection name to lowercase
+    - Creates or updates the mapping as needed
+    
+    **Request Body:**
+    ```json
+    {
+        "collection_name": "zomato",
+        "selected_fields": ["order_id", "order_amount", "store_code", "order_date", "customer_name"]
+    }
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Field mapping created successfully for collection 'zomato'",
+        "data": {
+            "collection_name": "zomato",
+            "selected_fields": ["order_id", "order_amount", "store_code", "order_date", "customer_name"],
+            "selected_fields_count": 5,
+            "total_available_fields": 50,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **400 Bad Request**: Invalid fields or empty selection
+    - **404 Not Found**: Collection doesn't exist
+    - **503 Service Unavailable**: MongoDB not connected
+    """
+    return await db_setup_controller.save_collection_field_mapping(
+        request.collection_name,
+        request.selected_fields
+    )
+
+
+@router.get(
+    "/uploader/setup/collection/fields/{collection_name}",
+    tags=["Database Setup"],
+    summary="Get field mapping for a collection",
+    description="Retrieve the saved field mapping for a specific collection.",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Field mapping retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Field mapping found for collection 'zomato'",
+                        "data": {
+                            "collection_name": "zomato",
+                            "selected_fields": ["order_id", "order_amount", "store_code"],
+                            "total_available_fields": 50,
+                            "created_at": "2024-01-01T12:00:00",
+                            "updated_at": "2024-01-01T12:00:00"
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Field mapping not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Field mapping not found for collection 'zomato'"
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_collection_field_mapping(collection_name: str):
+    """
+    Get field mapping for a specific collection.
+    
+    **Returns:**
+    - Collection name
+    - Selected fields array
+    - Total available fields count
+    - Created and updated timestamps
+    
+    **Example:**
+    ```
+    GET /api/uploader/setup/collection/fields/zomato
+    ```
+    """
+    return await db_setup_controller.get_collection_field_mapping(collection_name)
+
+
+@router.get(
+    "/uploader/setup/collection/fields",
+    tags=["Database Setup"],
+    summary="List all field mappings",
+    description="Get a list of all field mappings for all collections.",
+    status_code=status.HTTP_200_OK
+)
+async def list_all_field_mappings():
+    """
+    List all field mappings for all collections.
+    
+    **Returns:**
+    - List of all field mappings
+    - Total count of mappings
+    - MongoDB connection status
+    
+    **Use Case:**
+    - View all configured field mappings at once
+    - Audit which collections have mappings configured
+    """
+    return await db_setup_controller.list_all_field_mappings()
 
 
 # ============================================================================

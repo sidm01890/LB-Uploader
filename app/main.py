@@ -68,12 +68,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 class UploadTimeoutMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        # Disable buffering for upload endpoints to allow streaming
-        if request.url.path.startswith("/api/upload"):
-            response = await call_next(request)
-            response.headers["X-Accel-Buffering"] = "no"  # Disable nginx buffering
-            return response
-        return await call_next(request)
+        try:
+            # Disable buffering for upload endpoints to allow streaming
+            if request.url.path.startswith("/api/upload"):
+                response = await call_next(request)
+                response.headers["X-Accel-Buffering"] = "no"  # Disable nginx buffering
+                return response
+            return await call_next(request)
+        except Exception as e:
+            logging.error(f"❌ Error in UploadTimeoutMiddleware: {e}", exc_info=True)
+            raise
 
 app.add_middleware(UploadTimeoutMiddleware)
 
@@ -81,19 +85,24 @@ app.add_middleware(UploadTimeoutMiddleware)
 @app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     start_time = time.time()
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-    
-    # Log request/response
-    request_logger.log_response(
-        endpoint=request.url.path,
-        status_code=response.status_code,
-        response_time=process_time,
-        method=request.method
-    )
-    
-    return response
+    try:
+        response = await call_next(request)
+        process_time = time.time() - start_time
+        response.headers["X-Process-Time"] = str(process_time)
+        
+        # Log request/response
+        request_logger.log_response(
+            endpoint=request.url.path,
+            status_code=response.status_code,
+            response_time=process_time,
+            method=request.method
+        )
+        
+        return response
+    except Exception as e:
+        process_time = time.time() - start_time
+        logging.error(f"❌ Error processing request {request.url.path}: {e}", exc_info=True)
+        raise
 
 # Global exception handlers
 @app.exception_handler(HTTPException)

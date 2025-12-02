@@ -145,7 +145,7 @@ class MongoDBService:
         except Exception as e:
             logger.error(f"❌ Error saving file metadata to MongoDB: {e}")
             return None
-    
+
     def update_upload_status(
         self,
         upload_id: str,
@@ -217,7 +217,7 @@ class MongoDBService:
         except Exception as e:
             logger.error(f"❌ Error getting upload record from MongoDB: {e}")
             return None
-    
+
     def list_uploads(
         self,
         datasource: Optional[str] = None,
@@ -267,31 +267,42 @@ class MongoDBService:
     
     def list_all_collections(self) -> List[str]:
         """
-        List all collection names in the database
+        List all collection names from raw_data_collection
         
         Returns:
-            List of collection names (empty list if not connected)
+            List of collection names (empty list if not connected or collection doesn't exist)
         """
         if not self.is_connected():
             logger.warning("⚠️ MongoDB not connected, cannot list collections")
             return []
         
         try:
-            collections = self.db.list_collection_names()
-            # Filter out system collections (optional - you can remove this if you want to include them)
-            user_collections = [col for col in collections if not col.startswith("system.")]
-            logger.info(f"📋 Found {len(user_collections)} collections in database")
-            return sorted(user_collections)  # Return sorted list for consistency
+            raw_data_collection = self.db["raw_data_collection"]
+            # Check if collection exists (it might not exist if no collections were created via API yet)
+            if "raw_data_collection" not in self.db.list_collection_names():
+                logger.info("📋 raw_data_collection does not exist yet - returning empty list")
+                return []
+            
+            # Find all documents and extract collection names
+            documents = raw_data_collection.find({}, {"collection_name": 1})
+            collections = [doc.get("collection_name") for doc in documents if doc.get("collection_name")]
+            logger.info(f"📋 Found {len(collections)} collections in raw_data_collection")
+            return sorted(collections)  # Return sorted list for consistency
         except Exception as e:
-            logger.error(f"❌ Error listing collections: {e}")
+            logger.error(f"❌ Error listing collections from raw_data_collection: {e}")
             return []
-    
-    def create_collection(self, collection_name: str) -> Dict[str, Any]:
+
+    def create_collection(
+        self,
+        collection_name: str,
+        unique_ids: List[str] = None
+    ) -> Dict[str, Any]:
         """
-        Create a new collection in MongoDB if it doesn't exist
+        Create a new collection and its processed version in MongoDB if they don't exist
         
         Args:
             collection_name: Name of the collection to create (will be converted to lowercase)
+            unique_ids: List of field names that form unique identifiers (can be empty)
         
         Returns:
             Dictionary with status and message
@@ -302,30 +313,267 @@ class MongoDBService:
         if not self.is_connected():
             raise ConnectionError("MongoDB is not connected")
         
+        if unique_ids is None:
+            unique_ids = []
+        
         # Convert to lowercase as requested
         collection_name_lower = collection_name.lower()
+        processed_collection_name = f"{collection_name_lower}_processed"
         
-        # Check if collection already exists
+        # Check if collections already exist
         existing_collections = self.db.list_collection_names()
         if collection_name_lower in existing_collections:
             raise ValueError(f"Collection '{collection_name_lower}' already exists")
+        if processed_collection_name in existing_collections:
+            raise ValueError(f"Processed collection '{processed_collection_name}' already exists")
         
-        # Create the collection (MongoDB creates collections lazily, so we insert an empty doc and delete it)
+        # Create the main collection (MongoDB creates collections lazily, so we insert an empty doc and delete it)
         collection = self.db[collection_name_lower]
-        
-        # Create collection by inserting and immediately deleting a document
-        # This ensures the collection is created with proper structure
         temp_doc = {"_temp": True, "created_at": datetime.utcnow()}
         result = collection.insert_one(temp_doc)
         collection.delete_one({"_id": result.inserted_id})
-        
         logger.info(f"✅ Created new collection: {collection_name_lower}")
+        
+        # Create the processed collection
+        processed_collection = self.db[processed_collection_name]
+        temp_doc_processed = {"_temp": True, "created_at": datetime.utcnow()}
+        result_processed = processed_collection.insert_one(temp_doc_processed)
+        processed_collection.delete_one({"_id": result_processed.inserted_id})
+        logger.info(f"✅ Created processed collection: {processed_collection_name}")
+        
+        # Save entry to raw_data_collection
+        try:
+            raw_data_collection = self.db["raw_data_collection"]
+            # Check if entry already exists (shouldn't happen, but just in case)
+            existing_entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
+            if not existing_entry:
+                entry_doc = {
+                    "collection_name": collection_name_lower,
+                    "processed_collection_name": processed_collection_name,
+                    "unique_ids": unique_ids,
+                    "created_at": datetime.utcnow(),
+                    "created_via_api": True
+                }
+                raw_data_collection.insert_one(entry_doc)
+                logger.info(f"📝 Added '{collection_name_lower}' to raw_data_collection with unique_ids: {unique_ids}")
+            else:
+                logger.warning(f"⚠️ Entry for '{collection_name_lower}' already exists in raw_data_collection")
+        except Exception as e:
+            logger.error(f"❌ Failed to save entry to raw_data_collection: {e}")
+            # Don't fail the whole operation if raw_data_collection save fails
         
         return {
             "status": "success",
-            "message": f"Collection '{collection_name_lower}' created successfully",
-            "collection_name": collection_name_lower
+            "message": f"Collection '{collection_name_lower}' and processed collection '{processed_collection_name}' created successfully",
+            "collection_name": collection_name_lower,
+            "processed_collection_name": processed_collection_name,
+            "unique_ids": unique_ids
         }
+    
+    def get_collection_keys(self, collection_name: str) -> List[str]:
+        """
+        Get unique keys from all documents in a collection
+        
+        Args:
+            collection_name: Name of the collection (will be converted to lowercase)
+        
+        Returns:
+            List of unique keys (excluding _id, created_at, updated_at)
+        
+        Raises:
+            ValueError: If collection doesn't exist
+            ConnectionError: If MongoDB is not connected
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        collection_name_lower = collection_name.lower()
+        
+        # Check if collection exists
+        existing_collections = self.db.list_collection_names()
+        if collection_name_lower not in existing_collections:
+            raise ValueError(f"Collection '{collection_name_lower}' does not exist")
+        
+        try:
+            collection = self.db[collection_name_lower]
+            
+            # Get a sample of documents to extract keys
+            # We'll check multiple documents to get all possible keys
+            all_keys = set()
+            
+            # Get all documents (or a reasonable sample)
+            # For large collections, we might want to limit, but for now get all
+            documents = collection.find({}).limit(1000)  # Limit to first 1000 docs for performance
+            
+            for doc in documents:
+                # Extract all keys from the document
+                keys = doc.keys()
+                all_keys.update(keys)
+            
+            # Exclude system fields
+            excluded_keys = {"_id", "created_at", "updated_at"}
+            user_keys = sorted([key for key in all_keys if key not in excluded_keys])
+            
+            logger.info(f"🔑 Found {len(user_keys)} unique keys in collection '{collection_name_lower}'")
+            
+            return user_keys
+            
+        except ValueError:
+            # Re-raise ValueError
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error getting keys from collection '{collection_name_lower}': {e}")
+            raise ValueError(f"Failed to get keys from collection: {str(e)}")
+    
+    def save_collection_field_mapping(
+        self,
+        collection_name: str,
+        selected_fields: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Save or update field mapping for a collection
+        
+        Args:
+            collection_name: Name of the collection (will be converted to lowercase)
+            selected_fields: List of field names to use for this collection
+        
+        Returns:
+            Dictionary with status and message
+        
+        Raises:
+            ValueError: If collection doesn't exist
+            ConnectionError: If MongoDB is not connected
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        collection_name_lower = collection_name.lower()
+        
+        # Check if collection exists
+        existing_collections = self.db.list_collection_names()
+        if collection_name_lower not in existing_collections:
+            raise ValueError(f"Collection '{collection_name_lower}' does not exist")
+        
+        try:
+            # Get all available keys from the collection for validation
+            all_keys = self.get_collection_keys(collection_name_lower)
+            
+            # Validate that all selected fields exist in the collection
+            invalid_fields = [field for field in selected_fields if field not in all_keys]
+            if invalid_fields:
+                raise ValueError(
+                    f"Invalid fields for collection '{collection_name_lower}': {', '.join(invalid_fields)}. "
+                    f"Available fields: {', '.join(all_keys)}"
+                )
+            
+            # Save to collection_field_mappings collection
+            mappings_collection = self.db["collection_field_mappings"]
+            
+            mapping_doc = {
+                "collection_name": collection_name_lower,
+                "selected_fields": selected_fields,
+                "total_available_fields": len(all_keys),
+                "updated_at": datetime.utcnow()
+            }
+            
+            # Check if mapping already exists
+            existing_mapping = mappings_collection.find_one({"collection_name": collection_name_lower})
+            
+            if existing_mapping:
+                # Update existing mapping
+                mappings_collection.update_one(
+                    {"collection_name": collection_name_lower},
+                    {"$set": mapping_doc}
+                )
+                logger.info(f"🔄 Updated field mapping for collection '{collection_name_lower}'")
+                action = "updated"
+            else:
+                # Create new mapping
+                mapping_doc["created_at"] = datetime.utcnow()
+                mappings_collection.insert_one(mapping_doc)
+                logger.info(f"✅ Created field mapping for collection '{collection_name_lower}'")
+                action = "created"
+            
+            return {
+                "status": "success",
+                "message": f"Field mapping {action} successfully for collection '{collection_name_lower}'",
+                "collection_name": collection_name_lower,
+                "selected_fields_count": len(selected_fields),
+                "total_available_fields": len(all_keys)
+            }
+            
+        except ValueError:
+            # Re-raise ValueError
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error saving field mapping for collection '{collection_name_lower}': {e}")
+            raise ValueError(f"Failed to save field mapping: {str(e)}")
+    
+    def get_collection_field_mapping(self, collection_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get field mapping for a collection
+        
+        Args:
+            collection_name: Name of the collection (will be converted to lowercase)
+        
+        Returns:
+            Dictionary with mapping data or None if not found
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        collection_name_lower = collection_name.lower()
+        
+        try:
+            mappings_collection = self.db["collection_field_mappings"]
+            mapping = mappings_collection.find_one({"collection_name": collection_name_lower})
+            
+            if mapping:
+                # Convert ObjectId to string and datetime to ISO format
+                mapping["_id"] = str(mapping["_id"])
+                if "created_at" in mapping:
+                    mapping["created_at"] = mapping["created_at"].isoformat()
+                if "updated_at" in mapping:
+                    mapping["updated_at"] = mapping["updated_at"].isoformat()
+            
+            return mapping
+            
+        except Exception as e:
+            logger.error(f"❌ Error getting field mapping for collection '{collection_name_lower}': {e}")
+            return None
+    
+    def list_all_field_mappings(self) -> List[Dict[str, Any]]:
+        """
+        List all field mappings
+        
+        Returns:
+            List of field mappings (empty list if not connected)
+        """
+        if not self.is_connected():
+            logger.warning("⚠️ MongoDB not connected, cannot list field mappings")
+            return []
+        
+        try:
+            mappings_collection = self.db["collection_field_mappings"]
+            mappings = list(mappings_collection.find({}))
+            
+            # Convert ObjectId to string and datetime to ISO format
+            for mapping in mappings:
+                mapping["_id"] = str(mapping["_id"])
+                if "created_at" in mapping:
+                    mapping["created_at"] = mapping["created_at"].isoformat()
+                if "updated_at" in mapping:
+                    mapping["updated_at"] = mapping["updated_at"].isoformat()
+            
+            logger.info(f"📋 Found {len(mappings)} field mapping(s)")
+            return mappings
+            
+        except Exception as e:
+            logger.error(f"❌ Error listing field mappings: {e}")
+            return []
     
     def close(self):
         """Close MongoDB connection"""
