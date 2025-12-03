@@ -661,6 +661,278 @@ class MongoDBService:
                 "rows_inserted": 0
             }
     
+    def collection_exists(self, collection_name: str) -> bool:
+        """
+        Check if a MongoDB collection exists
+        
+        Args:
+            collection_name: Name of the collection to check (will be converted to lowercase)
+        
+        Returns:
+            True if collection exists, False otherwise
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            collection_name_lower = collection_name.lower()
+            existing_collections = self.db.list_collection_names()
+            return collection_name_lower in existing_collections
+        except Exception as e:
+            logger.error(f"❌ Error checking if collection '{collection_name}' exists: {e}")
+            return False
+    
+    def save_report_formulas(
+        self,
+        report_name: str,
+        formulas: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """
+        Save report formulas to a MongoDB collection.
+        If the collection doesn't exist, it will be created.
+        
+        Args:
+            report_name: Name of the report (will be used as collection name, converted to lowercase)
+            formulas: List of formula dictionaries with 'formula_name' and 'formula_value'
+        
+        Returns:
+            Dictionary with status and message
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        if not report_name or not report_name.strip():
+            raise ValueError("Report name is required and cannot be empty")
+        
+        if not formulas or len(formulas) == 0:
+            raise ValueError("At least one formula is required")
+        
+        try:
+            report_name_lower = report_name.lower().strip()
+            collection = self.db[report_name_lower]
+            
+            # Check if collection exists
+            collection_exists = self.collection_exists(report_name_lower)
+            
+            # Prepare document with report metadata and formulas
+            report_doc = {
+                "report_name": report_name_lower,
+                "formulas": formulas,
+                "formulas_count": len(formulas),
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            # If collection exists, update the existing document or insert new one
+            # We'll use upsert to either update or create
+            existing_doc = collection.find_one({"report_name": report_name_lower})
+            
+            if existing_doc:
+                # Update existing document
+                collection.update_one(
+                    {"report_name": report_name_lower},
+                    {"$set": {
+                        "formulas": formulas,
+                        "formulas_count": len(formulas),
+                        "updated_at": datetime.utcnow()
+                    }}
+                )
+                action = "updated"
+                logger.info(f"🔄 Updated report formulas in collection '{report_name_lower}'")
+            else:
+                # Insert new document
+                collection.insert_one(report_doc)
+                action = "created"
+                logger.info(f"✅ Created report formulas in collection '{report_name_lower}'")
+            
+            return {
+                "status": "success",
+                "message": f"Report formulas {action} successfully in collection '{report_name_lower}'",
+                "report_name": report_name_lower,
+                "formulas_count": len(formulas),
+                "collection_existed": collection_exists
+            }
+            
+        except ValueError:
+            raise
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error saving report formulas for '{report_name}': {e}")
+            raise ValueError(f"Failed to save report formulas: {str(e)}")
+    
+    def delete_collection(self, collection_name: str) -> Dict[str, Any]:
+        """
+        Delete a MongoDB collection
+        
+        Args:
+            collection_name: Name of the collection to delete (will be converted to lowercase)
+        
+        Returns:
+            Dictionary with status and message
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+            ValueError: If collection doesn't exist
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        if not collection_name or not collection_name.strip():
+            raise ValueError("Collection name is required and cannot be empty")
+        
+        try:
+            collection_name_lower = collection_name.lower().strip()
+            
+            # Check if collection exists
+            if not self.collection_exists(collection_name_lower):
+                raise ValueError(f"Collection '{collection_name_lower}' does not exist")
+            
+            # Drop the collection
+            self.db[collection_name_lower].drop()
+            logger.info(f"🗑️ Deleted collection '{collection_name_lower}'")
+            
+            return {
+                "status": "success",
+                "message": f"Collection '{collection_name_lower}' deleted successfully",
+                "collection_name": collection_name_lower
+            }
+            
+        except ValueError:
+            raise
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error deleting collection '{collection_name}': {e}")
+            raise ValueError(f"Failed to delete collection: {str(e)}")
+    
+    def get_report_formulas(self, report_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get report formulas from a MongoDB collection
+        
+        Args:
+            report_name: Name of the report (will be converted to lowercase)
+        
+        Returns:
+            Dictionary with report data or None if not found
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+            ValueError: If collection doesn't exist
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        if not report_name or not report_name.strip():
+            raise ValueError("Report name is required and cannot be empty")
+        
+        try:
+            report_name_lower = report_name.lower().strip()
+            
+            # Check if collection exists
+            if not self.collection_exists(report_name_lower):
+                raise ValueError(f"Report collection '{report_name_lower}' does not exist")
+            
+            # Get the document from collection
+            collection = self.db[report_name_lower]
+            document = collection.find_one({"report_name": report_name_lower})
+            
+            if not document:
+                logger.warning(f"⚠️ Report document not found in collection '{report_name_lower}'")
+                return None
+            
+            # Convert ObjectId to string and datetime to ISO format
+            if "_id" in document:
+                document["_id"] = str(document["_id"])
+            if "created_at" in document:
+                document["created_at"] = document["created_at"].isoformat()
+            if "updated_at" in document:
+                document["updated_at"] = document["updated_at"].isoformat()
+            
+            logger.info(f"✅ Retrieved report formulas from collection '{report_name_lower}'")
+            return document
+            
+        except ValueError:
+            raise
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error getting report formulas for '{report_name}': {e}")
+            raise ValueError(f"Failed to get report formulas: {str(e)}")
+    
+    def update_report_formulas(
+        self,
+        report_name: str,
+        formulas: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """
+        Update report formulas in an existing MongoDB collection.
+        Collection must exist.
+        
+        Args:
+            report_name: Name of the report (will be converted to lowercase)
+            formulas: List of formula dictionaries with 'formula_name' and 'formula_value'
+        
+        Returns:
+            Dictionary with status and message
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+            ValueError: If collection doesn't exist or validation fails
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        if not report_name or not report_name.strip():
+            raise ValueError("Report name is required and cannot be empty")
+        
+        if not formulas or len(formulas) == 0:
+            raise ValueError("At least one formula is required")
+        
+        try:
+            report_name_lower = report_name.lower().strip()
+            
+            # Check if collection exists
+            if not self.collection_exists(report_name_lower):
+                raise ValueError(f"Report collection '{report_name_lower}' does not exist")
+            
+            collection = self.db[report_name_lower]
+            
+            # Check if document exists
+            existing_doc = collection.find_one({"report_name": report_name_lower})
+            if not existing_doc:
+                raise ValueError(f"Report document not found in collection '{report_name_lower}'")
+            
+            # Update the document with new formulas
+            collection.update_one(
+                {"report_name": report_name_lower},
+                {"$set": {
+                    "formulas": formulas,
+                    "formulas_count": len(formulas),
+                    "updated_at": datetime.utcnow()
+                }}
+            )
+            
+            logger.info(f"🔄 Updated report formulas in collection '{report_name_lower}'")
+            
+            return {
+                "status": "success",
+                "message": f"Report formulas updated successfully in collection '{report_name_lower}'",
+                "report_name": report_name_lower,
+                "formulas_count": len(formulas)
+            }
+            
+        except ValueError:
+            raise
+        except ConnectionError:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error updating report formulas for '{report_name}': {e}")
+            raise ValueError(f"Failed to update report formulas: {str(e)}")
+    
     def close(self):
         """Close MongoDB connection"""
         if self.client is not None:
