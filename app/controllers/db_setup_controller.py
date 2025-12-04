@@ -270,10 +270,17 @@ class DBSetupController:
             mapping = mongodb_service.get_collection_field_mapping(collection_name.strip())
             
             if not mapping:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Field mapping not found for collection '{collection_name.lower()}'"
-                )
+                # Return 200 with empty/default data instead of 404
+                return {
+                    "status": 200,
+                    "message": f"No field mapping found for collection '{collection_name.lower().strip()}'",
+                    "data": {
+                        "collection_name": collection_name.lower().strip(),
+                        "selected_fields": [],
+                        "selected_fields_count": 0,
+                        "total_available_fields": 0
+                    }
+                }
             
             return {
                 "status": 200,
@@ -322,98 +329,17 @@ class DBSetupController:
                 detail=f"Failed to list field mappings: {str(e)}"
             )
     
-    async def save_report_formulas(
+    async def update_collection_unique_ids(
         self,
-        report_name: str,
-        formulas: List[Dict[str, str]]
+        collection_name: str,
+        unique_ids: List[str]
     ) -> Dict[str, Any]:
         """
-        Save report formulas to a MongoDB collection.
-        If the collection doesn't exist, it will be created.
+        Update unique_ids for an existing collection
         
         Args:
-            report_name: Name of the report (will be used as collection name)
-            formulas: List of formula dictionaries with 'formula_name' and 'formula_value'
-        
-        Returns:
-            Dictionary with status and details
-        
-        Raises:
-            HTTPException: If validation fails or MongoDB is not connected
-        """
-        if not report_name or not report_name.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Report name is required and cannot be empty"
-            )
-        
-        if not formulas or len(formulas) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="At least one formula is required"
-            )
-        
-        # Validate formula structure
-        for formula in formulas:
-            if not isinstance(formula, dict):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Each formula must be a dictionary with 'formula_name' and 'formula_value'"
-                )
-            if "formula_name" not in formula or "formula_value" not in formula:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Each formula must have 'formula_name' and 'formula_value' fields"
-                )
-            if not formula.get("formula_name") or not formula.get("formula_value"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Formula name and value cannot be empty"
-                )
-        
-        try:
-            result = mongodb_service.save_report_formulas(
-                report_name.strip(),
-                formulas
-            )
-            
-            return {
-                "status": 200,
-                "message": result["message"],
-                "data": {
-                    "report_name": result["report_name"],
-                    "formulas_count": result["formulas_count"],
-                    "formulas": formulas,
-                    "collection_existed": result["collection_existed"],
-                    "mongodb_connected": mongodb_service.is_connected()
-                }
-            }
-        
-        except ValueError as e:
-            raise HTTPException(
-                status_code=400,
-                detail=str(e)
-            )
-        
-        except ConnectionError as e:
-            raise HTTPException(
-                status_code=503,
-                detail=f"MongoDB connection error: {str(e)}"
-            )
-        
-        except Exception as e:
-            logger.error(f"❌ Error saving report formulas for '{report_name}': {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to save report formulas: {str(e)}"
-            )
-    
-    async def delete_report_collection(self, report_name: str) -> Dict[str, Any]:
-        """
-        Delete a report collection from MongoDB
-        
-        Args:
-            report_name: Name of the report collection to delete
+            collection_name: Name of the collection
+            unique_ids: List of field names that form unique identifiers
         
         Returns:
             Dictionary with status and details
@@ -421,27 +347,34 @@ class DBSetupController:
         Raises:
             HTTPException: If collection doesn't exist or MongoDB is not connected
         """
-        if not report_name or not report_name.strip():
+        if not collection_name or not collection_name.strip():
             raise HTTPException(
                 status_code=400,
-                detail="Report name is required and cannot be empty"
+                detail="Collection name is required and cannot be empty"
             )
         
+        if unique_ids is None:
+            unique_ids = []
+        
         try:
-            result = mongodb_service.delete_collection(report_name.strip())
+            result = mongodb_service.update_collection_unique_ids(
+                collection_name.strip(),
+                unique_ids
+            )
             
             return {
                 "status": 200,
                 "message": result["message"],
                 "data": {
-                    "report_name": result["collection_name"],
+                    "collection_name": result["collection_name"],
+                    "unique_ids": result["unique_ids"],
                     "mongodb_connected": mongodb_service.is_connected()
                 }
             }
         
         except ValueError as e:
             error_msg = str(e)
-            if "does not exist" in error_msg:
+            if "not found" in error_msg.lower():
                 raise HTTPException(
                     status_code=404,
                     detail=error_msg
@@ -459,169 +392,61 @@ class DBSetupController:
             )
         
         except Exception as e:
-            logger.error(f"❌ Error deleting report collection '{report_name}': {e}")
+            logger.error(f"❌ Error updating unique_ids for collection '{collection_name}': {e}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to delete report collection: {str(e)}"
+                detail=f"Failed to update unique_ids: {str(e)}"
             )
     
-    async def get_report_formulas(self, report_name: str) -> Dict[str, Any]:
+    async def get_collection_unique_ids(self, collection_name: str) -> Dict[str, Any]:
         """
-        Get report formulas from a MongoDB collection
+        Get unique_ids for a collection
         
         Args:
-            report_name: Name of the report collection
+            collection_name: Name of the collection
         
         Returns:
-            Dictionary with status and report data
+            Dictionary with status and unique_ids data
         
         Raises:
             HTTPException: If collection doesn't exist or MongoDB is not connected
         """
-        if not report_name or not report_name.strip():
+        if not collection_name or not collection_name.strip():
             raise HTTPException(
                 status_code=400,
-                detail="Report name is required and cannot be empty"
+                detail="Collection name is required and cannot be empty"
             )
         
         try:
-            document = mongodb_service.get_report_formulas(report_name.strip())
+            result = mongodb_service.get_collection_unique_ids(collection_name.strip())
             
-            if not document:
+            if not result:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Report document not found in collection '{report_name.lower().strip()}'"
+                    detail=f"Collection '{collection_name.lower().strip()}' not found in raw_data_collection"
                 )
             
             return {
                 "status": 200,
-                "message": "Report formulas retrieved successfully",
+                "message": f"Unique IDs retrieved successfully for collection '{result['collection_name']}'",
                 "data": {
-                    "report_name": document.get("report_name"),
-                    "formulas": document.get("formulas", []),
-                    "formulas_count": document.get("formulas_count", len(document.get("formulas", []))),
-                    "created_at": document.get("created_at"),
-                    "updated_at": document.get("updated_at"),
+                    "collection_name": result["collection_name"],
+                    "unique_ids": result["unique_ids"],
+                    "unique_ids_count": result["unique_ids_count"],
                     "mongodb_connected": mongodb_service.is_connected()
                 }
             }
         
-        except ValueError as e:
-            error_msg = str(e)
-            if "does not exist" in error_msg or "not found" in error_msg:
-                raise HTTPException(
-                    status_code=404,
-                    detail=error_msg
-                )
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=error_msg
-                )
-        
+        except HTTPException:
+            raise
         except ConnectionError as e:
             raise HTTPException(
                 status_code=503,
                 detail=f"MongoDB connection error: {str(e)}"
             )
-        
         except Exception as e:
-            logger.error(f"❌ Error getting report formulas for '{report_name}': {e}")
+            logger.error(f"❌ Error getting unique_ids for collection '{collection_name}': {e}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to get report formulas: {str(e)}"
+                detail=f"Failed to get unique_ids: {str(e)}"
             )
-    
-    async def update_report_formulas(
-        self,
-        report_name: str,
-        formulas: List[Dict[str, str]]
-    ) -> Dict[str, Any]:
-        """
-        Update report formulas in an existing MongoDB collection.
-        Collection must exist.
-        
-        Args:
-            report_name: Name of the report collection
-            formulas: List of formula dictionaries with 'formula_name' and 'formula_value'
-        
-        Returns:
-            Dictionary with status and details
-        
-        Raises:
-            HTTPException: If validation fails, collection doesn't exist, or MongoDB is not connected
-        """
-        if not report_name or not report_name.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Report name is required and cannot be empty"
-            )
-        
-        if not formulas or len(formulas) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="At least one formula is required"
-            )
-        
-        # Validate formula structure
-        for formula in formulas:
-            if not isinstance(formula, dict):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Each formula must be a dictionary with 'formula_name' and 'formula_value'"
-                )
-            if "formula_name" not in formula or "formula_value" not in formula:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Each formula must have 'formula_name' and 'formula_value' fields"
-                )
-            if not formula.get("formula_name") or not formula.get("formula_value"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Formula name and value cannot be empty"
-                )
-        
-        try:
-            result = mongodb_service.update_report_formulas(
-                report_name.strip(),
-                formulas
-            )
-            
-            return {
-                "status": 200,
-                "message": result["message"],
-                "data": {
-                    "report_name": result["report_name"],
-                    "formulas_count": result["formulas_count"],
-                    "formulas": formulas,
-                    "mongodb_connected": mongodb_service.is_connected()
-                }
-            }
-        
-        except ValueError as e:
-            error_msg = str(e)
-            if "does not exist" in error_msg or "not found" in error_msg:
-                raise HTTPException(
-                    status_code=404,
-                    detail=error_msg
-                )
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=error_msg
-                )
-        
-        except ConnectionError as e:
-            raise HTTPException(
-                status_code=503,
-                detail=f"MongoDB connection error: {str(e)}"
-            )
-        
-        except Exception as e:
-            logger.error(f"❌ Error updating report formulas for '{report_name}': {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to update report formulas: {str(e)}"
-            )
-
-    

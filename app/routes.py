@@ -12,6 +12,7 @@ import logging
 # Import controllers
 from app.controllers.data_controller import DataController
 from app.controllers.db_setup_controller import DBSetupController
+from app.controllers.formulas_controller import FormulasController
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ router = APIRouter()  # Main API router with /api prefix
 # Initialize controllers
 data_controller = DataController()
 db_setup_controller = DBSetupController()
+formulas_controller = FormulasController()
 
 
 # ============================================================================
@@ -257,6 +259,237 @@ async def create_collection(request: CreateCollectionRequest = Body(...)):
         request.collection_name,
         request.unique_ids
     )
+
+
+class UpdateUniqueIdsRequest(BaseModel):
+    """Request model for updating unique_ids"""
+    collection_name: str = Field(
+        ...,
+        description="Name of the collection (will be converted to lowercase)",
+        example="zomato",
+        min_length=1
+    )
+    unique_ids: List[str] = Field(
+        ...,
+        description="List of field names that form unique identifiers for this collection",
+        example=["order_id", "order_date"]
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "collection_name": "zomato",
+                "unique_ids": ["order_id", "order_date"]
+            }
+        }
+
+
+class UpdateUniqueIdsResponse(BaseModel):
+    """Response model for updating unique_ids"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Unique IDs updated successfully for collection 'zomato'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collection_name": "zomato",
+            "unique_ids": ["order_id", "order_date"],
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.put(
+    "/uploader/setup/new",
+    tags=["Database Setup"],
+    summary="Update unique_ids for a collection",
+    description="Update the unique_ids field for an existing collection in raw_data_collection. The collection must already exist.",
+    response_model=UpdateUniqueIdsResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Unique IDs updated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Unique IDs updated successfully for collection 'zomato'",
+                        "data": {
+                            "collection_name": "zomato",
+                            "unique_ids": ["order_id", "order_date"],
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato' not found in raw_data_collection. Please create the collection first."
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def update_collection_unique_ids(request: UpdateUniqueIdsRequest = Body(...)):
+    """
+    Update unique_ids for an existing collection.
+    
+    **Features:**
+    - Updates the unique_ids field in raw_data_collection
+    - Collection name is automatically converted to lowercase
+    - Collection must already exist (created via POST /uploader/setup/new)
+    
+    **Request Body:**
+    ```json
+    {
+        "collection_name": "zomato",
+        "unique_ids": ["order_id", "order_date"]
+    }
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Unique IDs updated successfully for collection 'zomato'",
+        "data": {
+            "collection_name": "zomato",
+            "unique_ids": ["order_id", "order_date"],
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **404 Not Found**: Collection doesn't exist in raw_data_collection
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    
+    **Note:** This endpoint only updates the unique_ids field. It does not create a new collection. Use POST /uploader/setup/new to create a new collection.
+    """
+    return await db_setup_controller.update_collection_unique_ids(
+        request.collection_name,
+        request.unique_ids
+    )
+
+
+class GetUniqueIdsResponse(BaseModel):
+    """Response model for getting unique_ids"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Unique IDs retrieved successfully for collection 'zomato'")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collection_name": "zomato",
+            "unique_ids": ["order_id", "order_date"],
+            "unique_ids_count": 2,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.get(
+    "/uploader/setup/new/{collection_name}",
+    tags=["Database Setup"],
+    summary="Get unique_ids for a collection",
+    description="Retrieve the unique_ids field for an existing collection from raw_data_collection.",
+    response_model=GetUniqueIdsResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Unique IDs retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Unique IDs retrieved successfully for collection 'zomato'",
+                        "data": {
+                            "collection_name": "zomato",
+                            "unique_ids": ["order_id", "order_date"],
+                            "unique_ids_count": 2,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        404: {
+            "description": "Collection not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato' not found in raw_data_collection"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_collection_unique_ids(collection_name: str):
+    """
+    Get unique_ids for an existing collection.
+    
+    **Features:**
+    - Retrieves the unique_ids field from raw_data_collection
+    - Collection name is automatically converted to lowercase
+    - Returns empty array if unique_ids is not set
+    
+    **Path Parameter:**
+    - `collection_name`: Name of the collection (e.g., "zomato")
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Unique IDs retrieved successfully for collection 'zomato'",
+        "data": {
+            "collection_name": "zomato",
+            "unique_ids": ["order_id", "order_date"],
+            "unique_ids_count": 2,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **404 Not Found**: Collection doesn't exist in raw_data_collection
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    
+    **Example:**
+    ```
+    GET /api/uploader/setup/new/zomato
+    ```
+    
+    **Note:** This endpoint retrieves unique_ids from the raw_data_collection. If the collection was not created via POST /uploader/setup/new, it will return 404.
+    """
+    return await db_setup_controller.get_collection_unique_ids(collection_name)
 
 
 class ListCollectionsResponse(BaseModel):
@@ -628,12 +861,19 @@ async def save_collection_field_mapping(request: SaveFieldMappingRequest = Body(
                 }
             }
         },
-        404: {
-            "description": "Field mapping not found",
+        200: {
+            "description": "Field mapping retrieved (empty if not found)",
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Field mapping not found for collection 'zomato'"
+                        "status": 200,
+                        "message": "No field mapping found for collection 'pos'",
+                        "data": {
+                            "collection_name": "pos",
+                            "selected_fields": [],
+                            "selected_fields_count": 0,
+                            "total_available_fields": 0
+                        }
                     }
                 }
             }
@@ -646,13 +886,45 @@ async def get_collection_field_mapping(collection_name: str):
     
     **Returns:**
     - Collection name
-    - Selected fields array
+    - Selected fields array (empty array if no mapping exists)
     - Total available fields count
-    - Created and updated timestamps
+    - Created and updated timestamps (if mapping exists)
+    
+    **Note:** If no field mapping exists for the collection, returns 200 with empty selected_fields array instead of 404.
     
     **Example:**
     ```
     GET /api/uploader/setup/collection/fields/zomato
+    ```
+    
+    **Response when mapping exists:**
+    ```json
+    {
+        "status": 200,
+        "message": "Field mapping found for collection 'zomato'",
+        "data": {
+            "collection_name": "zomato",
+            "selected_fields": ["order_id", "order_amount", "store_code"],
+            "selected_fields_count": 3,
+            "total_available_fields": 50,
+            "created_at": "2024-01-01T12:00:00",
+            "updated_at": "2024-01-01T12:00:00"
+        }
+    }
+    ```
+    
+    **Response when no mapping exists:**
+    ```json
+    {
+        "status": 200,
+        "message": "No field mapping found for collection 'pos'",
+        "data": {
+            "collection_name": "pos",
+            "selected_fields": [],
+            "selected_fields_count": 0,
+            "total_available_fields": 0
+        }
+    }
     ```
     """
     return await db_setup_controller.get_collection_field_mapping(collection_name)
@@ -685,24 +957,53 @@ async def list_all_field_mappings():
 # REPORT FORMULAS ROUTES
 # ============================================================================
 
+class FormulaField(BaseModel):
+    """Model for a single field in a formula"""
+    type: str = Field(..., description="Field type (data_field, operator, etc.)", example="data_field")
+    dataset_type: str = Field(default="Dataset", description="Dataset type", example="Dataset")
+    selectedDataSetValue: str = Field(default="", description="Selected dataset value", example="zvd")
+    selectedFieldValue: str = Field(default="", description="Selected field value", example="zomato")
+    customFieldValue: str = Field(default="", description="Custom field value", example="")
+    startBrackets: List[str] = Field(default_factory=list, description="Start brackets", example=[])
+    endBrackets: List[str] = Field(default_factory=list, description="End brackets", example=[])
+    selectedTableName: str = Field(default="", description="Selected table name", example="zomato")
+    selectedTableColumn: str = Field(default="", description="Selected table column", example="zvd")
+
+
 class FormulaItem(BaseModel):
     """Model for a single formula"""
-    formula_name: str = Field(
-        ...,
-        description="Name of the formula",
-        example="pos_order_id"
-    )
-    formula_value: str = Field(
-        ...,
-        description="Formula expression/value",
-        example="pos.order_id"
-    )
+    id: int = Field(..., description="Formula ID", example=1)
+    logicName: str = Field(..., description="Logic name of the formula", example="Total Amount")
+    fields: List[FormulaField] = Field(..., description="List of fields in the formula", min_items=1)
+    formulaText: str = Field(..., description="Formula text expression", example="zomato.zvd + zomato.merchant_pack_charge")
+    logicNameKey: str = Field(..., description="Logic name key", example="TOTAL_AMOUNT")
+    multipleColumn: bool = Field(default=False, description="Whether formula uses multiple columns")
+    active_group_index: int = Field(default=0, description="Active group index", example=0)
+    excelFormulaText: str = Field(default="", description="Excel formula text", example=" zomato.zvd + zomato.merchant_pack_charge")
     
     class Config:
         json_schema_extra = {
             "example": {
-                "formula_name": "pos_order_id",
-                "formula_value": "pos.order_id"
+                "id": 1,
+                "logicName": "Total Amount",
+                "fields": [
+                    {
+                        "type": "data_field",
+                        "dataset_type": "Dataset",
+                        "selectedDataSetValue": "zvd",
+                        "selectedFieldValue": "zomato",
+                        "customFieldValue": "",
+                        "startBrackets": [],
+                        "endBrackets": [],
+                        "selectedTableName": "zomato",
+                        "selectedTableColumn": "zvd"
+                    }
+                ],
+                "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                "logicNameKey": "TOTAL_AMOUNT",
+                "multipleColumn": False,
+                "active_group_index": 0,
+                "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
             }
         }
 
@@ -717,8 +1018,8 @@ class SaveReportFormulasRequest(BaseModel):
     )
     formulas: List[FormulaItem] = Field(
         ...,
-        description="List of formulas with formula_name and formula_value",
-        min_items=1
+        description="List of formulas with logicName, formulaText, fields, etc. (can be empty)",
+        default_factory=list
     )
     
     class Config:
@@ -727,20 +1028,43 @@ class SaveReportFormulasRequest(BaseModel):
                 "report_name": "zomato_vs_pos_summary",
                 "formulas": [
                     {
-                        "formula_name": "pos_order_id",
-                        "formula_value": "pos.order_id"
-                    },
-                    {
-                        "formula_name": "zomato_order_id",
-                        "formula_value": "zomato.order_id"
-                    },
-                    {
-                        "formula_name": "pos_net_amount",
-                        "formula_value": "pos.net_amount"
-                    },
-                    {
-                        "formula_name": "zomato_net_amount",
-                        "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                        "id": 1,
+                        "logicName": "Total Amount",
+                        "fields": [
+                            {
+                                "type": "data_field",
+                                "dataset_type": "Dataset",
+                                "selectedDataSetValue": "zvd",
+                                "selectedFieldValue": "zomato",
+                                "customFieldValue": "",
+                                "startBrackets": [],
+                                "endBrackets": [],
+                                "selectedTableName": "zomato",
+                                "selectedTableColumn": "zvd"
+                            },
+                            {
+                                "type": "operator",
+                                "dataset_type": "Dataset",
+                                "selectedFieldValue": "+",
+                                "selectedTableName": ""
+                            },
+                            {
+                                "type": "data_field",
+                                "dataset_type": "Dataset",
+                                "selectedDataSetValue": "merchant_pack_charge",
+                                "selectedFieldValue": "zomato",
+                                "customFieldValue": "",
+                                "startBrackets": [],
+                                "endBrackets": [],
+                                "selectedTableName": "zomato",
+                                "selectedTableColumn": "merchant_pack_charge"
+                            }
+                        ],
+                        "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                        "logicNameKey": "TOTAL_AMOUNT",
+                        "multipleColumn": False,
+                        "active_group_index": 0,
+                        "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                     }
                 ]
             }
@@ -756,10 +1080,30 @@ class SaveReportFormulasResponse(BaseModel):
         description="Response data",
         example={
             "report_name": "zomato_vs_pos_summary",
-            "formulas_count": 4,
+            "formulas_count": 1,
             "formulas": [
-                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
-                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+                {
+                    "id": 1,
+                    "logicName": "Total Amount",
+                    "fields": [
+                        {
+                            "type": "data_field",
+                            "dataset_type": "Dataset",
+                            "selectedDataSetValue": "zvd",
+                            "selectedFieldValue": "zomato",
+                            "customFieldValue": "",
+                            "startBrackets": [],
+                            "endBrackets": [],
+                            "selectedTableName": "zomato",
+                            "selectedTableColumn": "zvd"
+                        }
+                    ],
+                    "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                    "logicNameKey": "TOTAL_AMOUNT",
+                    "multipleColumn": False,
+                    "active_group_index": 0,
+                    "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
+                }
             ],
             "collection_existed": False,
             "mongodb_connected": True
@@ -822,13 +1166,16 @@ class SaveReportFormulasResponse(BaseModel):
 )
 async def save_report_formulas(request: SaveReportFormulasRequest = Body(...)):
     """
-    Save report formulas to a MongoDB collection.
+    Save report formulas to the 'formulas' collection.
     
     **Features:**
-    - Automatically creates the collection if it doesn't exist
-    - Updates existing formulas if the collection already exists
-    - Report name is converted to lowercase and used as collection name
-    - Validates that all formulas have required fields
+    - Saves all formulas to a single 'formulas' collection
+    - Automatically creates the 'formulas' collection if it doesn't exist
+    - Updates existing formulas if a document with the report name already exists
+    - Creates a new document if the report doesn't exist
+    - Report name is converted to lowercase
+    - Validates that all formulas have required fields (if provided)
+    - Allows empty formulas array to clear all formulas for a report
     
     **Request Body:**
     ```json
@@ -855,11 +1202,13 @@ async def save_report_formulas(request: SaveReportFormulasRequest = Body(...)):
     }
     ```
     
+    **Note:** The `formulas` array can be empty `[]` to clear all formulas for a report.
+    
     **Success Response (200):**
     ```json
     {
         "status": 200,
-        "message": "Report formulas created successfully in collection 'zomato_vs_pos_summary'",
+        "message": "Report formulas created successfully for 'zomato_vs_pos_summary' in 'formulas' collection",
         "data": {
             "report_name": "zomato_vs_pos_summary",
             "formulas_count": 4,
@@ -875,13 +1224,10 @@ async def save_report_formulas(request: SaveReportFormulasRequest = Body(...)):
     - **503 Service Unavailable**: MongoDB not connected
     - **500 Internal Server Error**: Other errors
     """
-    # Convert FormulaItem objects to dictionaries
-    formulas_dict = [
-        {"formula_name": f.formula_name, "formula_value": f.formula_value}
-        for f in request.formulas
-    ]
+    # Convert FormulaItem Pydantic models to dictionaries
+    formulas_dict = [f.model_dump() for f in request.formulas]
     
-    return await db_setup_controller.save_report_formulas(
+    return await formulas_controller.save_report_formulas(
         request.report_name,
         formulas_dict
     )
@@ -897,10 +1243,30 @@ class GetReportFormulasResponse(BaseModel):
         example={
             "report_name": "zomato_vs_pos_summary",
             "formulas": [
-                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
-                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+                {
+                    "id": 1,
+                    "logicName": "Total Amount",
+                    "fields": [
+                        {
+                            "type": "data_field",
+                            "dataset_type": "Dataset",
+                            "selectedDataSetValue": "zvd",
+                            "selectedFieldValue": "zomato",
+                            "customFieldValue": "",
+                            "startBrackets": [],
+                            "endBrackets": [],
+                            "selectedTableName": "zomato",
+                            "selectedTableColumn": "zvd"
+                        }
+                    ],
+                    "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                    "logicNameKey": "TOTAL_AMOUNT",
+                    "multipleColumn": False,
+                    "active_group_index": 0,
+                    "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
+                }
             ],
-            "formulas_count": 4,
+            "formulas_count": 1,
             "created_at": "2024-01-01T12:00:00",
             "updated_at": "2024-01-01T12:00:00",
             "mongodb_connected": True
@@ -926,12 +1292,30 @@ class GetReportFormulasResponse(BaseModel):
                         "data": {
                             "report_name": "zomato_vs_pos_summary",
                             "formulas": [
-                                {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
-                                {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"},
-                                {"formula_name": "pos_net_amount", "formula_value": "pos.net_amount"},
-                                {"formula_name": "zomato_net_amount", "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"}
+                                {
+                                    "id": 1,
+                                    "logicName": "Total Amount",
+                                    "fields": [
+                                        {
+                                            "type": "data_field",
+                                            "dataset_type": "Dataset",
+                                            "selectedDataSetValue": "zvd",
+                                            "selectedFieldValue": "zomato",
+                                            "customFieldValue": "",
+                                            "startBrackets": [],
+                                            "endBrackets": [],
+                                            "selectedTableName": "zomato",
+                                            "selectedTableColumn": "zvd"
+                                        }
+                                    ],
+                                    "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                                    "logicNameKey": "TOTAL_AMOUNT",
+                                    "multipleColumn": False,
+                                    "active_group_index": 0,
+                                    "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
+                                }
                             ],
-                            "formulas_count": 4,
+                            "formulas_count": 1,
                             "created_at": "2024-01-15T10:30:00.123456",
                             "updated_at": "2024-01-15T10:30:00.123456",
                             "mongodb_connected": True
@@ -964,10 +1348,10 @@ class GetReportFormulasResponse(BaseModel):
 )
 async def get_report_formulas(report_name: str):
     """
-    Get report formulas by report name.
+    Get report formulas by report name from the 'formulas' collection.
     
     **Features:**
-    - Retrieves all formulas for a specific report collection
+    - Retrieves all formulas for a specific report from the 'formulas' collection
     - Returns formulas, timestamps, and metadata
     - Report name is converted to lowercase
     
@@ -985,23 +1369,46 @@ async def get_report_formulas(report_name: str):
             "report_name": "zomato_vs_pos_summary",
             "formulas": [
                 {
-                    "formula_name": "pos_order_id",
-                    "formula_value": "pos.order_id"
-                },
-                {
-                    "formula_name": "zomato_order_id",
-                    "formula_value": "zomato.order_id"
-                },
-                {
-                    "formula_name": "pos_net_amount",
-                    "formula_value": "pos.net_amount"
-                },
-                {
-                    "formula_name": "zomato_net_amount",
-                    "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                    "id": 1,
+                    "logicName": "Total Amount",
+                    "fields": [
+                        {
+                            "type": "data_field",
+                            "dataset_type": "Dataset",
+                            "selectedDataSetValue": "zvd",
+                            "selectedFieldValue": "zomato",
+                            "customFieldValue": "",
+                            "startBrackets": [],
+                            "endBrackets": [],
+                            "selectedTableName": "zomato",
+                            "selectedTableColumn": "zvd"
+                        },
+                        {
+                            "type": "operator",
+                            "dataset_type": "Dataset",
+                            "selectedFieldValue": "+",
+                            "selectedTableName": ""
+                        },
+                        {
+                            "type": "data_field",
+                            "dataset_type": "Dataset",
+                            "selectedDataSetValue": "merchant_pack_charge",
+                            "selectedFieldValue": "zomato",
+                            "customFieldValue": "",
+                            "startBrackets": [],
+                            "endBrackets": [],
+                            "selectedTableName": "zomato",
+                            "selectedTableColumn": "merchant_pack_charge"
+                        }
+                    ],
+                    "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                    "logicNameKey": "TOTAL_AMOUNT",
+                    "multipleColumn": False,
+                    "active_group_index": 0,
+                    "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                 }
             ],
-            "formulas_count": 4,
+            "formulas_count": 1,
             "created_at": "2024-01-15T10:30:00.123456",
             "updated_at": "2024-01-15T10:30:00.123456",
             "mongodb_connected": true
@@ -1014,15 +1421,15 @@ async def get_report_formulas(report_name: str):
     - **503 Service Unavailable**: MongoDB not connected
     - **500 Internal Server Error**: Other errors
     """
-    return await db_setup_controller.get_report_formulas(report_name)
+    return await formulas_controller.get_report_formulas(report_name)
 
 
 class UpdateReportFormulasRequest(BaseModel):
     """Request model for updating report formulas"""
     formulas: List[FormulaItem] = Field(
         ...,
-        description="List of formulas with formula_name and formula_value",
-        min_items=1
+        description="List of formulas with logicName, formulaText, fields, etc. (can be empty)",
+        default_factory=list
     )
     
     class Config:
@@ -1030,20 +1437,32 @@ class UpdateReportFormulasRequest(BaseModel):
             "example": {
                 "formulas": [
                     {
-                        "formula_name": "pos_order_id",
-                        "formula_value": "pos.order_id"
-                    },
-                    {
-                        "formula_name": "zomato_order_id",
-                        "formula_value": "zomato.order_id"
-                    },
-                    {
-                        "formula_name": "pos_net_amount",
-                        "formula_value": "pos.net_amount"
-                    },
-                    {
-                        "formula_name": "zomato_net_amount",
-                        "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                        "id": 1,
+                        "logicName": "Total Amount",
+                        "fields": [
+                            {
+                                "type": "data_field",
+                                "dataset_type": "Dataset",
+                                "selectedDataSetValue": "zvd",
+                                "selectedFieldValue": "zomato",
+                                "customFieldValue": "",
+                                "startBrackets": [],
+                                "endBrackets": [],
+                                "selectedTableName": "zomato",
+                                "selectedTableColumn": "zvd"
+                            },
+                            {
+                                "type": "operator",
+                                "dataset_type": "Dataset",
+                                "selectedFieldValue": "+",
+                                "selectedTableName": ""
+                            }
+                        ],
+                        "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                        "logicNameKey": "TOTAL_AMOUNT",
+                        "multipleColumn": False,
+                        "active_group_index": 0,
+                        "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                     }
                 ]
             }
@@ -1136,13 +1555,14 @@ async def update_report_formulas(
     request: UpdateReportFormulasRequest = Body(...)
 ):
     """
-    Update report formulas in an existing MongoDB collection.
+    Update report formulas in the 'formulas' collection.
     
     **Features:**
-    - Updates formulas in an existing collection (collection must exist)
+    - Updates formulas in the 'formulas' collection (document must exist)
     - Replaces all existing formulas with the new set
     - Report name is converted to lowercase
-    - Validates that all formulas have required fields
+    - Validates that all formulas have required fields (if provided)
+    - Allows empty formulas array to clear all formulas for a report
     - Updates the `updated_at` timestamp
     
     **Request Body:**
@@ -1150,24 +1570,49 @@ async def update_report_formulas(
     {
         "formulas": [
             {
-                "formula_name": "pos_order_id",
-                "formula_value": "pos.order_id"
-            },
-            {
-                "formula_name": "zomato_order_id",
-                "formula_value": "zomato.order_id"
-            },
-            {
-                "formula_name": "pos_net_amount",
-                "formula_value": "pos.net_amount"
-            },
-            {
-                "formula_name": "zomato_net_amount",
-                "formula_value": "zomato.sub_total - zomato.mvd + zomato.gst"
+                "id": 1,
+                "logicName": "Total Amount",
+                "fields": [
+                    {
+                        "type": "data_field",
+                        "dataset_type": "Dataset",
+                        "selectedDataSetValue": "zvd",
+                        "selectedFieldValue": "zomato",
+                        "customFieldValue": "",
+                        "startBrackets": [],
+                        "endBrackets": [],
+                        "selectedTableName": "zomato",
+                        "selectedTableColumn": "zvd"
+                    },
+                    {
+                        "type": "operator",
+                        "dataset_type": "Dataset",
+                        "selectedFieldValue": "+",
+                        "selectedTableName": ""
+                    },
+                    {
+                        "type": "data_field",
+                        "dataset_type": "Dataset",
+                        "selectedDataSetValue": "merchant_pack_charge",
+                        "selectedFieldValue": "zomato",
+                        "customFieldValue": "",
+                        "startBrackets": [],
+                        "endBrackets": [],
+                        "selectedTableName": "zomato",
+                        "selectedTableColumn": "merchant_pack_charge"
+                    }
+                ],
+                "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
+                "logicNameKey": "TOTAL_AMOUNT",
+                "multipleColumn": false,
+                "active_group_index": 0,
+                "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
             }
         ]
     }
     ```
+    
+    **Note:** The `formulas` array can be empty `[]` to clear all formulas for a report.
     
     **Example:**
     ```
@@ -1178,7 +1623,7 @@ async def update_report_formulas(
     ```json
     {
         "status": 200,
-        "message": "Report formulas updated successfully in collection 'zomato_vs_pos_summary'",
+        "message": "Report formulas updated successfully for 'zomato_vs_pos_summary' in 'formulas' collection",
         "data": {
             "report_name": "zomato_vs_pos_summary",
             "formulas_count": 4,
@@ -1190,33 +1635,31 @@ async def update_report_formulas(
     
     **Error Responses:**
     - **400 Bad Request**: Invalid request or missing required fields
-    - **404 Not Found**: Collection or document doesn't exist
+    - **404 Not Found**: Document doesn't exist in 'formulas' collection
     - **503 Service Unavailable**: MongoDB not connected
     - **500 Internal Server Error**: Other errors
     
-    **Note:** This endpoint requires the collection to exist. Use the POST endpoint to create a new report collection.
+    **Note:** This endpoint requires the document to exist in the 'formulas' collection. Use the POST endpoint to create a new report document.
     """
-    # Convert FormulaItem objects to dictionaries
-    formulas_dict = [
-        {"formula_name": f.formula_name, "formula_value": f.formula_value}
-        for f in request.formulas
-    ]
+    # Convert FormulaItem Pydantic models to dictionaries
+    formulas_dict = [f.model_dump() for f in request.formulas]
     
-    return await db_setup_controller.update_report_formulas(
+    return await formulas_controller.update_report_formulas(
         report_name,
         formulas_dict
     )
 
 
 class DeleteReportResponse(BaseModel):
-    """Response model for deleting report collection"""
+    """Response model for deleting report formulas"""
     status: int = Field(..., description="HTTP status code", example=200)
-    message: str = Field(..., description="Response message", example="Collection 'zomato_vs_pos_summary' deleted successfully")
+    message: str = Field(..., description="Response message", example="Report formulas for 'zomato_vs_pos_summary' deleted successfully from 'formulas' collection")
     data: Dict[str, Any] = Field(
         ...,
         description="Response data",
         example={
             "report_name": "zomato_vs_pos_summary",
+            "collection_name": "formulas",
             "mongodb_connected": True
         }
     )
@@ -1225,20 +1668,21 @@ class DeleteReportResponse(BaseModel):
 @router.delete(
     "/uploader/reports/{report_name}",
     tags=["Report Formulas"],
-    summary="Delete report collection",
-    description="Delete a report collection from MongoDB. This will permanently delete the collection and all its data.",
+    summary="Delete report formulas",
+    description="Delete a report document from the 'formulas' collection. This will permanently delete the report's formulas.",
     response_model=DeleteReportResponse,
     status_code=status.HTTP_200_OK,
     responses={
         200: {
-            "description": "Report collection deleted successfully",
+            "description": "Report formulas deleted successfully",
             "content": {
                 "application/json": {
                     "example": {
                         "status": 200,
-                        "message": "Collection 'zomato_vs_pos_summary' deleted successfully",
+                        "message": "Report formulas for 'zomato_vs_pos_summary' deleted successfully from 'formulas' collection",
                         "data": {
                             "report_name": "zomato_vs_pos_summary",
+                            "collection_name": "formulas",
                             "mongodb_connected": True
                         }
                     }
@@ -1246,11 +1690,11 @@ class DeleteReportResponse(BaseModel):
             }
         },
         404: {
-            "description": "Report collection not found",
+            "description": "Report document not found",
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Collection 'zomato_vs_pos_summary' does not exist"
+                        "detail": "Report document not found for 'zomato_vs_pos_summary' in 'formulas' collection"
                     }
                 }
             }
@@ -1269,12 +1713,13 @@ class DeleteReportResponse(BaseModel):
 )
 async def delete_report_collection(report_name: str):
     """
-    Delete a report collection from MongoDB.
+    Delete a report document from the 'formulas' collection.
     
     **Features:**
-    - Permanently deletes the collection and all its data
+    - Permanently deletes the report's formulas document from the 'formulas' collection
     - Report name is converted to lowercase
-    - Returns error if collection doesn't exist
+    - Returns error if document doesn't exist
+    - Only deletes the specific report document, not the entire collection
     
     **Example:**
     ```
@@ -1285,22 +1730,150 @@ async def delete_report_collection(report_name: str):
     ```json
     {
         "status": 200,
-        "message": "Collection 'zomato_vs_pos_summary' deleted successfully",
+        "message": "Report formulas for 'zomato_vs_pos_summary' deleted successfully from 'formulas' collection",
         "data": {
             "report_name": "zomato_vs_pos_summary",
+            "collection_name": "formulas",
             "mongodb_connected": true
         }
     }
     ```
     
     **Error Responses:**
-    - **404 Not Found**: Collection doesn't exist
+    - **404 Not Found**: Report document doesn't exist
     - **503 Service Unavailable**: MongoDB not connected
     - **500 Internal Server Error**: Other errors
     
-    **Warning:** This operation is irreversible. All data in the collection will be permanently deleted.
+    **Warning:** This operation is irreversible. The report's formulas will be permanently deleted.
     """
-    return await db_setup_controller.delete_report_collection(report_name)
+    return await formulas_controller.delete_report_collection(report_name)
+
+
+class GetAllFormulasResponse(BaseModel):
+    """Response model for getting all formulas"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Retrieved 3 report formula(s) successfully")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "formulas": [
+                {
+                    "_id": "507f1f77bcf86cd799439011",
+                    "report_name": "zomato_vs_pos_summary",
+                    "formulas": [
+                        {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                        {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+                    ],
+                    "formulas_count": 2,
+                    "created_at": "2024-01-15T10:30:00.123456",
+                    "updated_at": "2024-01-15T10:30:00.123456"
+                }
+            ],
+            "count": 1,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.get(
+    "/uploader/reports/formulas/all",
+    tags=["Report Formulas"],
+    summary="Get all report formulas",
+    description="Retrieve all report formulas from the 'formulas' collection.",
+    response_model=GetAllFormulasResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "All report formulas retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Retrieved 3 report formula(s) successfully",
+                        "data": {
+                            "formulas": [
+                                {
+                                    "_id": "507f1f77bcf86cd799439011",
+                                    "report_name": "zomato_vs_pos_summary",
+                                    "formulas": [
+                                        {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
+                                        {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
+                                    ],
+                                    "formulas_count": 4,
+                                    "created_at": "2024-01-15T10:30:00.123456",
+                                    "updated_at": "2024-01-15T10:30:00.123456"
+                                }
+                            ],
+                            "count": 1,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def get_all_formulas():
+    """
+    Get all report formulas from the 'formulas' collection.
+    
+    **Features:**
+    - Retrieves all report formulas stored in the 'formulas' collection
+    - Returns formulas sorted by report name
+    - Returns empty list if collection doesn't exist or is empty
+    
+    **Example:**
+    ```
+    GET /api/uploader/reports/formulas/all
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Retrieved 3 report formula(s) successfully",
+        "data": {
+            "formulas": [
+                {
+                    "_id": "507f1f77bcf86cd799439011",
+                    "report_name": "zomato_vs_pos_summary",
+                    "formulas": [
+                        {
+                            "formula_name": "pos_order_id",
+                            "formula_value": "pos.order_id"
+                        },
+                        {
+                            "formula_name": "zomato_order_id",
+                            "formula_value": "zomato.order_id"
+                        }
+                    ],
+                    "formulas_count": 2,
+                    "created_at": "2024-01-15T10:30:00.123456",
+                    "updated_at": "2024-01-15T10:30:00.123456"
+                }
+            ],
+            "count": 1,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    """
+    return await formulas_controller.get_all_formulas()
 
 
 # ============================================================================

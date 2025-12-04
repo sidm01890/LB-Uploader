@@ -5,13 +5,46 @@ from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 import time
 import logging
+import os
 from app.routes import router
 from app.logging_config import setup_logging, request_logger
 from app.core.config import config
 from app.core.environment import get_environment
 
+# Import scheduler and controller for scheduled jobs
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+from app.controllers.scheduled_jobs_controller import ScheduledJobsController
+
 # Setup logging with environment-aware level
 setup_logging(config.log_level)
+
+# Initialize scheduler and controller
+scheduler = AsyncIOScheduler()
+scheduled_jobs_controller = ScheduledJobsController()
+
+async def run_scheduled_processing_job():
+    """
+    Scheduled function that runs the collection data processing job
+    This function processes all collections based on field mappings
+    """
+    try:
+        logging.info("🔄 Starting scheduled collection data processing job...")
+        result = await scheduled_jobs_controller.process_collection_data()
+        
+        if result.get("status") == 200:
+            data = result.get("data", {})
+            collections_processed = data.get("collections_processed", 0)
+            total_documents = data.get("total_documents_processed", 0)
+            logging.info(
+                f"✅ Scheduled job completed: {collections_processed} collection(s) processed, "
+                f"{total_documents} document(s) processed"
+            )
+        else:
+            logging.warning(f"⚠️ Scheduled job completed with status: {result.get('status')}")
+            
+    except Exception as e:
+        logging.error(f"❌ Error in scheduled processing job: {e}", exc_info=True)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,14 +55,33 @@ async def lifespan(app: FastAPI):
     if config.enable_docs:
         logging.info("API Documentation available at /docs")
     
-    # Automation system removed - only file upload functionality is available
+    # Start scheduled job processing
+    # Get interval from config or default to 5 minutes
+    # You can configure this via environment variable: SCHEDULED_JOB_INTERVAL_MINUTES
+    job_interval_minutes = int(os.getenv("SCHEDULED_JOB_INTERVAL_MINUTES", "5"))
+    
+    # Add scheduled job to run at specified interval
+    scheduler.add_job(
+        run_scheduled_processing_job,
+        trigger=IntervalTrigger(minutes=job_interval_minutes),
+        id="collection_data_processing",
+        name="Collection Data Processing Job",
+        replace_existing=True
+    )
+    
+    # Start the scheduler
+    # scheduler.start()
+    logging.info(f"✅ Scheduled job processing started - running every {job_interval_minutes} minute(s)")
     
     yield
     
     # Shutdown
     logging.info("File Upload Service API shutting down...")
     
-    # Automation system removed - only file upload functionality is available
+    # Shutdown scheduler
+    if scheduler.running:
+        scheduler.shutdown()
+        logging.info("✅ Scheduler stopped")
 
 # Determine docs URLs based on environment
 docs_url = "/docs" if config.enable_docs else None
@@ -154,8 +206,6 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 # Include routers
 # All routes are now in routes.py
-from app.routes import router
-
 app.include_router(router, prefix="/api", tags=["File Upload"])
 
 # Lifespan events handled above in the lifespan function

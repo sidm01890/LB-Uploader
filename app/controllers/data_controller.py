@@ -14,6 +14,7 @@ import pandas as pd
 
 from app.services.email_service import EmailService
 from app.services.mongodb_service import mongodb_service
+from app.core.header_normalizer import normalize_dataframe_columns
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +154,10 @@ class DataController:
                     else:
                         # Excel file - read first sheet by default
                         df = pd.read_excel(absolute_path, engine='openpyxl')
+                    
+                    # Normalize column headers (clean special characters, spaces, etc.)
+                    df = normalize_dataframe_columns(df, inplace=False)
+                    logger.info(f"📝 Normalized column headers: {list(df.columns)}")
                     
                     # Replace NaN/NaT with None for MongoDB compatibility
                     df = df.replace({pd.NA: None, pd.NaT: None})
