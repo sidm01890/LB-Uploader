@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import uuid
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, BulkWriteError
 from app.core.config import config
 
 logger = logging.getLogger(__name__)
@@ -196,6 +196,59 @@ class MongoDBService:
             logger.error(f"❌ Error updating upload status in MongoDB: {e}")
             return False
     
+    def update_upload_status_by_datasource(
+        self,
+        datasource: str,
+        status: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Update upload status for all files with a specific datasource
+        
+        Args:
+            datasource: Data source identifier (e.g., "zomato", "pos")
+            status: New status (e.g., 'processed', 'failed')
+            metadata: Additional metadata to update
+        
+        Returns:
+            Number of files updated
+        """
+        if not self.is_connected():
+            return 0
+        
+        try:
+            # Convert datasource to uppercase to match stored format
+            datasource_upper = datasource.upper()
+            
+            update_data = {
+                "status": status,
+                "updated_at": datetime.utcnow()
+            }
+            
+            if metadata:
+                update_data.update(metadata)
+            
+            # Update all files with this datasource that are not already in the target status
+            result = self.db.uploaded_files.update_many(
+                {
+                    "datasource": datasource_upper,
+                    "status": {"$ne": status}  # Only update if status is different
+                },
+                {"$set": update_data}
+            )
+            
+            if result.modified_count > 0:
+                logger.info(
+                    f"✅ Updated {result.modified_count} file(s) status to '{status}' "
+                    f"for datasource '{datasource_upper}'"
+                )
+            
+            return result.modified_count
+                
+        except Exception as e:
+            logger.error(f"❌ Error updating upload status by datasource in MongoDB: {e}")
+            return 0
+    
     def get_upload_record(self, upload_id: str) -> Optional[Dict[str, Any]]:
         """Get upload record by upload_id"""
         if not self.is_connected():
@@ -245,7 +298,11 @@ class MongoDBService:
             if status:
                 query["status"] = status
             
-            records = self.db.uploaded_files.find(query).sort("uploaded_at", -1).limit(limit)
+            # If limit is 0 or None, get all records (no limit)
+            if limit and limit > 0:
+                records = self.db.uploaded_files.find(query).sort("uploaded_at", -1).limit(limit)
+            else:
+                records = self.db.uploaded_files.find(query).sort("uploaded_at", -1)
             
             result = []
             for record in records:
@@ -738,25 +795,137 @@ class MongoDBService:
             # Create separate document for each row
             current_time = datetime.utcnow()
             documents = []
+            skipped_rows = 0
             
-            for row in row_data:
-                # Each row becomes a separate document
-                # Add timestamps to each row document
-                document = dict(row)  # Create a copy of the row
-                document["created_at"] = current_time
-                document["updated_at"] = current_time
-                documents.append(document)
+            for idx, row in enumerate(row_data):
+                try:
+                    # Each row becomes a separate document
+                    # Add timestamps to each row document
+                    document = dict(row)  # Create a copy of the row
+                    document["created_at"] = current_time
+                    document["updated_at"] = current_time
+                    documents.append(document)
+                except Exception as doc_error:
+                    skipped_rows += 1
+                    logger.warning(f"⚠️ Failed to create document from row {idx}: {doc_error}")
             
-            # Insert all documents
+            if skipped_rows > 0:
+                logger.warning(f"⚠️ Skipped {skipped_rows} rows during document creation")
+            
+            # Validate document count matches row data count
+            if len(documents) != len(row_data):
+                logger.warning(
+                    f"⚠️ Document creation mismatch: Expected {len(row_data)} documents, "
+                    f"created {len(documents)} documents. Difference: {len(row_data) - len(documents)}"
+                )
+            
+            # Insert all documents in batches to handle large datasets
+            # MongoDB has a 16MB limit per batch, so we'll use 10k records per batch for safety
+            batch_size = 10000
+            rows_inserted = 0
+            rows_failed = 0
+            total_batches = (len(documents) + batch_size - 1) // batch_size
+            
             if documents:
-                result = collection.insert_many(documents)
-                rows_inserted = len(result.inserted_ids)
+                logger.info(
+                    f"📦 Inserting {len(documents):,} documents in {total_batches} batch(es) of {batch_size:,} "
+                    f"(Expected from row_data: {len(row_data):,})"
+                )
+                if len(documents) != len(row_data):
+                    logger.warning(
+                        f"⚠️ Document count mismatch: {len(documents):,} documents to insert vs "
+                        f"{len(row_data):,} rows in input data"
+                    )
                 
-                logger.info(f"✅ Saved {rows_inserted} row documents to MongoDB collection '{collection_name_lower}'")
+                for i in range(0, len(documents), batch_size):
+                    batch = documents[i:i + batch_size]
+                    batch_num = (i // batch_size) + 1
+                    
+                    try:
+                        result = collection.insert_many(batch, ordered=False)  # ordered=False for better performance
+                        batch_inserted = len(result.inserted_ids)
+                        rows_inserted += batch_inserted
+                        logger.info(f"✅ Batch {batch_num}/{total_batches}: Inserted {batch_inserted}/{len(batch)} documents")
+                    except Exception as batch_error:
+                        # Handle BulkWriteError which contains details about partial failures
+                        if isinstance(batch_error, BulkWriteError):
+                            # Some documents may have been inserted before the error
+                            batch_inserted = batch_error.details.get('nInserted', 0)
+                            rows_inserted += batch_inserted
+                            
+                            # Get details about failed documents
+                            write_errors = batch_error.details.get('writeErrors', [])
+                            failed_count = len(write_errors)
+                            rows_failed += failed_count
+                            
+                            # Log error details
+                            error_codes = {}
+                            for error in write_errors:
+                                code = error.get('code', 'unknown')
+                                error_codes[code] = error_codes.get(code, 0) + 1
+                            
+                            logger.warning(
+                                f"⚠️ Batch {batch_num}/{total_batches}: Partially inserted {batch_inserted}/{len(batch)} documents. "
+                                f"Failed: {failed_count}. Error codes: {error_codes}"
+                            )
+                            
+                            # Try to insert failed documents one by one (skip duplicates)
+                            if write_errors:
+                                failed_indices = {error.get('index') for error in write_errors}
+                                for idx, doc in enumerate(batch):
+                                    if idx in failed_indices:
+                                        try:
+                                            collection.insert_one(doc)
+                                            rows_inserted += 1
+                                            rows_failed -= 1
+                                        except Exception as doc_error:
+                                            # Check if it's a duplicate key error (E11000)
+                                            error_str = str(doc_error)
+                                            if 'E11000' in error_str or 'duplicate key' in error_str.lower():
+                                                logger.debug(f"⚠️ Document at index {idx} is duplicate, skipping")
+                                            else:
+                                                logger.warning(f"⚠️ Failed to insert document at index {idx}: {doc_error}")
+                        else:
+                            # Other types of errors - try to insert documents one by one
+                            logger.error(f"❌ Error inserting batch {batch_num}/{total_batches}: {batch_error}")
+                            for idx, doc in enumerate(batch):
+                                try:
+                                    collection.insert_one(doc)
+                                    rows_inserted += 1
+                                except Exception as doc_error:
+                                    # Check if it's a duplicate key error (E11000)
+                                    error_str = str(doc_error)
+                                    if 'E11000' in error_str or 'duplicate key' in error_str.lower():
+                                        logger.debug(f"⚠️ Document at index {idx} is duplicate, skipping")
+                                    else:
+                                        logger.warning(f"⚠️ Failed to insert document at index {idx}: {doc_error}")
+                                        rows_failed += 1
+                
+                # Calculate summary
+                total_expected = len(documents)
+                total_inserted = rows_inserted
+                total_failed = rows_failed
+                missing_count = total_expected - total_inserted - total_failed
+                
+                logger.info(
+                    f"✅ Insertion Summary for '{collection_name_lower}': "
+                    f"Expected: {total_expected:,}, Inserted: {total_inserted:,}, "
+                    f"Failed: {total_failed:,}, Missing: {missing_count:,}"
+                )
+                
+                if missing_count > 0:
+                    logger.warning(
+                        f"⚠️ {missing_count:,} documents are unaccounted for. "
+                        f"This might indicate duplicate records in source data or processing errors."
+                    )
+                
                 return {
                     "success": True,
-                    "message": f"Successfully saved {rows_inserted} row documents to collection '{collection_name_lower}'",
+                    "message": f"Successfully saved {rows_inserted:,} row documents to collection '{collection_name_lower}'. Failed: {rows_failed:,}",
                     "rows_inserted": rows_inserted,
+                    "rows_expected": total_expected,
+                    "rows_failed": rows_failed,
+                    "rows_missing": missing_count,
                     "columns_count": len(row_data[0]) if row_data else 0,
                     "collection_name": collection_name_lower
                 }
@@ -800,7 +969,9 @@ class MongoDBService:
     def save_report_formulas(
         self,
         report_name: str,
-        formulas: List[Dict[str, str]]
+        formulas: List[Dict[str, str]],
+        mapping_keys: Dict[str, List[str]] = None,
+        conditions: Dict[str, List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Save report formulas to the 'formulas' collection.
@@ -822,6 +993,12 @@ class MongoDBService:
         if not report_name or not report_name.strip():
             raise ValueError("Report name is required and cannot be empty")
         
+        if mapping_keys is None:
+            mapping_keys = {}
+        
+        if conditions is None:
+            conditions = {}
+        
         # Allow empty formulas array - no validation needed
         
         try:
@@ -836,6 +1013,8 @@ class MongoDBService:
                 "report_name": report_name_lower,
                 "formulas": formulas,
                 "formulas_count": len(formulas),
+                "mapping_keys": mapping_keys,
+                "conditions": conditions,
                 "created_at": datetime.utcnow(),
                 "updated_at": datetime.utcnow()
             }
@@ -850,6 +1029,8 @@ class MongoDBService:
                     {"$set": {
                         "formulas": formulas,
                         "formulas_count": len(formulas),
+                        "mapping_keys": mapping_keys,
+                        "conditions": conditions,
                         "updated_at": datetime.utcnow()
                     }}
                 )
@@ -866,6 +1047,8 @@ class MongoDBService:
                 "message": f"Report formulas {action} successfully for '{report_name_lower}' in 'formulas' collection",
                 "report_name": report_name_lower,
                 "formulas_count": len(formulas),
+                "mapping_keys": mapping_keys,
+                "conditions": conditions,
                 "collection_existed": collection_exists
             }
             
@@ -979,7 +1162,9 @@ class MongoDBService:
     def update_report_formulas(
         self,
         report_name: str,
-        formulas: List[Dict[str, str]]
+        formulas: List[Dict[str, str]],
+        mapping_keys: Dict[str, List[str]] = None,
+        conditions: Dict[str, List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Update report formulas in the 'formulas' collection.
@@ -1001,6 +1186,12 @@ class MongoDBService:
         
         if not report_name or not report_name.strip():
             raise ValueError("Report name is required and cannot be empty")
+        
+        if mapping_keys is None:
+            mapping_keys = {}
+        
+        if conditions is None:
+            conditions = {}
         
         # Allow empty formulas array - no validation needed
         
@@ -1024,6 +1215,8 @@ class MongoDBService:
                 {"$set": {
                     "formulas": formulas,
                     "formulas_count": len(formulas),
+                    "mapping_keys": mapping_keys,
+                    "conditions": conditions,
                     "updated_at": datetime.utcnow()
                 }}
             )
@@ -1034,7 +1227,9 @@ class MongoDBService:
                 "status": "success",
                 "message": f"Report formulas updated successfully for '{report_name_lower}' in 'formulas' collection",
                 "report_name": report_name_lower,
-                "formulas_count": len(formulas)
+                "formulas_count": len(formulas),
+                "mapping_keys": mapping_keys,
+                "conditions": conditions
             }
             
         except ValueError:

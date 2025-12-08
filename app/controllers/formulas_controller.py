@@ -20,7 +20,9 @@ class FormulasController:
     async def save_report_formulas(
         self,
         report_name: str,
-        formulas: List[Dict[str, Any]]
+        formulas: List[Dict[str, Any]],
+        mapping_keys: Dict[str, List[str]] = None,
+        conditions: Dict[str, List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Save report formulas to a MongoDB collection.
@@ -41,6 +43,12 @@ class FormulasController:
                 status_code=400,
                 detail="Report name is required and cannot be empty"
             )
+        
+        if mapping_keys is None:
+            mapping_keys = {}
+        
+        if conditions is None:
+            conditions = {}
         
         # Allow empty formulas array - no validation needed
         
@@ -65,7 +73,9 @@ class FormulasController:
         try:
             result = mongodb_service.save_report_formulas(
                 report_name.strip(),
-                formulas
+                formulas,
+                mapping_keys,
+                conditions
             )
             
             return {
@@ -75,6 +85,8 @@ class FormulasController:
                     "report_name": result["report_name"],
                     "formulas_count": result["formulas_count"],
                     "formulas": formulas,
+                    "mapping_keys": result.get("mapping_keys", {}),
+                    "conditions": result.get("conditions", {}),
                     "collection_existed": result["collection_existed"],
                     "mongodb_connected": mongodb_service.is_connected()
                 }
@@ -192,6 +204,8 @@ class FormulasController:
                     "report_name": document.get("report_name"),
                     "formulas": document.get("formulas", []),
                     "formulas_count": document.get("formulas_count", len(document.get("formulas", []))),
+                    "mapping_keys": document.get("mapping_keys", {}),
+                    "conditions": document.get("conditions", {}),
                     "created_at": document.get("created_at"),
                     "updated_at": document.get("updated_at"),
                     "mongodb_connected": mongodb_service.is_connected()
@@ -227,7 +241,9 @@ class FormulasController:
     async def update_report_formulas(
         self,
         report_name: str,
-        formulas: List[Dict[str, Any]]
+        formulas: List[Dict[str, Any]],
+        mapping_keys: Dict[str, List[str]] = None,
+        conditions: Dict[str, List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Update report formulas in an existing MongoDB collection.
@@ -248,6 +264,12 @@ class FormulasController:
                 status_code=400,
                 detail="Report name is required and cannot be empty"
             )
+        
+        if mapping_keys is None:
+            mapping_keys = {}
+        
+        if conditions is None:
+            conditions = {}
         
         # Allow empty formulas array - no validation needed
         
@@ -278,7 +300,9 @@ class FormulasController:
         try:
             result = mongodb_service.update_report_formulas(
                 report_name.strip(),
-                formulas
+                formulas,
+                mapping_keys,
+                conditions
             )
             
             return {
@@ -288,6 +312,8 @@ class FormulasController:
                     "report_name": result["report_name"],
                     "formulas_count": result["formulas_count"],
                     "formulas": formulas,
+                    "mapping_keys": result.get("mapping_keys", {}),
+                    "conditions": result.get("conditions", {}),
                     "mongodb_connected": mongodb_service.is_connected()
                 }
             }

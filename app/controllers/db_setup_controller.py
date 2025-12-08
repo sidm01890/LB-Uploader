@@ -450,3 +450,39 @@ class DBSetupController:
                 status_code=500,
                 detail=f"Failed to get unique_ids: {str(e)}"
             )
+    
+    async def list_all_uploaded_files(self) -> Dict[str, Any]:
+        """
+        Get all data from uploaded_files collection
+        
+        Returns:
+            Dictionary with status and list of all uploaded files
+        
+        Raises:
+            HTTPException: If MongoDB is not connected
+        """
+        try:
+            # Get all uploaded files (no limit, get all records)
+            uploaded_files = mongodb_service.list_uploads(limit=None)  # limit=None means no limit
+            
+            return {
+                "status": 200,
+                "message": f"Found {len(uploaded_files)} uploaded file(s)",
+                "data": {
+                    "uploaded_files": uploaded_files,
+                    "count": len(uploaded_files),
+                    "mongodb_connected": mongodb_service.is_connected()
+                }
+            }
+        
+        except ConnectionError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"MongoDB connection error: {str(e)}"
+            )
+        except Exception as e:
+            logger.error(f"❌ Error listing uploaded files: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to list uploaded files: {str(e)}"
+            )

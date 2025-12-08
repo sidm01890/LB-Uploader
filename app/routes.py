@@ -953,6 +953,124 @@ async def list_all_field_mappings():
     return await db_setup_controller.list_all_field_mappings()
 
 
+class ListUploadedFilesResponse(BaseModel):
+    """Response model for listing uploaded files"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Found 5 uploaded file(s)")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "uploaded_files": [
+                {
+                    "upload_id": "abc123",
+                    "filename": "zomato_data.xlsx",
+                    "datasource": "ZOMATO",
+                    "file_path": "/path/to/file.xlsx",
+                    "file_size": 1024000,
+                    "status": "processed",
+                    "uploaded_at": "2024-01-15T10:00:00",
+                    "processed_at": "2024-01-15T10:05:00"
+                }
+            ],
+            "count": 5,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.get(
+    "/uploader/setup/uploaded-files",
+    tags=["Database Setup"],
+    summary="List all uploaded files",
+    description="Get all data from the uploaded_files collection. Returns all file upload records with their metadata, status, and processing information.",
+    response_model=ListUploadedFilesResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Uploaded files retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Found 5 uploaded file(s)",
+                        "data": {
+                            "uploaded_files": [
+                                {
+                                    "upload_id": "abc123",
+                                    "filename": "zomato_data.xlsx",
+                                    "datasource": "ZOMATO",
+                                    "file_path": "/path/to/file.xlsx",
+                                    "file_size": 1024000,
+                                    "status": "processed",
+                                    "uploaded_at": "2024-01-15T10:00:00",
+                                    "processed_at": "2024-01-15T10:05:00",
+                                    "documents_processed": 800000
+                                }
+                            ],
+                            "count": 5,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def list_all_uploaded_files():
+    """
+    Get all data from the uploaded_files collection.
+    
+    **Features:**
+    - Returns all uploaded file records
+    - Includes file metadata, status, and processing information
+    - Files are sorted by upload time (newest first)
+    - Returns empty array if no files exist or MongoDB is not connected
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Found 5 uploaded file(s)",
+        "data": {
+            "uploaded_files": [
+                {
+                    "upload_id": "abc123",
+                    "filename": "zomato_data.xlsx",
+                    "datasource": "ZOMATO",
+                    "file_path": "/path/to/file.xlsx",
+                    "file_size": 1024000,
+                    "file_type": "xlsx",
+                    "status": "processed",
+                    "uploaded_at": "2024-01-15T10:00:00",
+                    "uploaded_by": "api_user",
+                    "processed_at": "2024-01-15T10:05:00",
+                    "documents_processed": 800000,
+                    "created_at": "2024-01-15T10:00:00",
+                    "updated_at": "2024-01-15T10:05:00"
+                }
+            ],
+            "count": 5,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Note:** If MongoDB is not connected, the `uploaded_files` array will be empty and `mongodb_connected` will be `false`.
+    """
+    return await db_setup_controller.list_all_uploaded_files()
+
+
 # ============================================================================
 # REPORT FORMULAS ROUTES
 # ============================================================================
@@ -968,6 +1086,13 @@ class FormulaField(BaseModel):
     endBrackets: List[str] = Field(default_factory=list, description="End brackets", example=[])
     selectedTableName: str = Field(default="", description="Selected table name", example="zomato")
     selectedTableColumn: str = Field(default="", description="Selected table column", example="zvd")
+
+
+class ConditionItem(BaseModel):
+    """Model for a single condition"""
+    column: str = Field(..., description="Column name to apply condition on", example="order_id")
+    operator: str = Field(..., description="Comparison operator (equal, not_equal, greater_than, less_than, etc.)", example="not_equal")
+    value: Any = Field(..., description="Value to compare against", example="NULL")
 
 
 class FormulaItem(BaseModel):
@@ -1021,6 +1146,14 @@ class SaveReportFormulasRequest(BaseModel):
         description="List of formulas with logicName, formulaText, fields, etc. (can be empty)",
         default_factory=list
     )
+    mapping_keys: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Mapping keys for joining collections (e.g., {'zomato': ['order_id', 'order_date'], 'pos': ['paytm_counter']})"
+    )
+    conditions: Dict[str, List[ConditionItem]] = Field(
+        default_factory=dict,
+        description="Conditions to filter data from collections (e.g., {'zomato': [{'column': 'order_id', 'operator': 'not_equal', 'value': 'NULL'}]})"
+    )
     
     class Config:
         json_schema_extra = {
@@ -1066,7 +1199,27 @@ class SaveReportFormulasRequest(BaseModel):
                         "active_group_index": 0,
                         "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                     }
-                ]
+                ],
+                "mapping_keys": {
+                    "zomato": ["order_id", "order_date"],
+                    "pos": ["paytm_counter"]
+                },
+                "conditions": {
+                    "zomato": [
+                        {
+                            "column": "order_id",
+                            "operator": "not_equal",
+                            "value": "NULL"
+                        }
+                    ],
+                    "pos": [
+                        {
+                            "column": "sales_type",
+                            "operator": "equal",
+                            "value": "ZOMATO"
+                        }
+                    ]
+                }
             }
         }
 
@@ -1105,6 +1258,26 @@ class SaveReportFormulasResponse(BaseModel):
                     "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                 }
             ],
+            "mapping_keys": {
+                "zomato": ["order_id", "order_date"],
+                "pos": ["paytm_counter"]
+            },
+            "conditions": {
+                "zomato": [
+                    {
+                        "column": "order_id",
+                        "operator": "not_equal",
+                        "value": "NULL"
+                    }
+                ],
+                "pos": [
+                    {
+                        "column": "sales_type",
+                        "operator": "equal",
+                        "value": "ZOMATO"
+                    }
+                ]
+            },
             "collection_existed": False,
             "mongodb_connected": True
         }
@@ -1226,10 +1399,17 @@ async def save_report_formulas(request: SaveReportFormulasRequest = Body(...)):
     """
     # Convert FormulaItem Pydantic models to dictionaries
     formulas_dict = [f.model_dump() for f in request.formulas]
+    # Convert ConditionItem Pydantic models to dictionaries
+    conditions_dict = {
+        key: [c.model_dump() for c in conditions_list]
+        for key, conditions_list in request.conditions.items()
+    }
     
     return await formulas_controller.save_report_formulas(
         request.report_name,
-        formulas_dict
+        formulas_dict,
+        request.mapping_keys,
+        conditions_dict
     )
 
 
@@ -1267,6 +1447,26 @@ class GetReportFormulasResponse(BaseModel):
                 }
             ],
             "formulas_count": 1,
+            "mapping_keys": {
+                "zomato": ["order_id", "order_date"],
+                "pos": ["paytm_counter"]
+            },
+            "conditions": {
+                "zomato": [
+                    {
+                        "column": "order_id",
+                        "operator": "not_equal",
+                        "value": "NULL"
+                    }
+                ],
+                "pos": [
+                    {
+                        "column": "sales_type",
+                        "operator": "equal",
+                        "value": "ZOMATO"
+                    }
+                ]
+            },
             "created_at": "2024-01-01T12:00:00",
             "updated_at": "2024-01-01T12:00:00",
             "mongodb_connected": True
@@ -1431,6 +1631,14 @@ class UpdateReportFormulasRequest(BaseModel):
         description="List of formulas with logicName, formulaText, fields, etc. (can be empty)",
         default_factory=list
     )
+    mapping_keys: Dict[str, List[str]] = Field(
+        default_factory=dict,
+        description="Mapping keys for joining collections (e.g., {'zomato': ['order_id', 'order_date'], 'pos': ['paytm_counter']})"
+    )
+    conditions: Dict[str, List[ConditionItem]] = Field(
+        default_factory=dict,
+        description="Conditions to filter data from collections (e.g., {'zomato': [{'column': 'order_id', 'operator': 'not_equal', 'value': 'NULL'}]})"
+    )
     
     class Config:
         json_schema_extra = {
@@ -1464,7 +1672,27 @@ class UpdateReportFormulasRequest(BaseModel):
                         "active_group_index": 0,
                         "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
                     }
-                ]
+                ],
+                "mapping_keys": {
+                    "zomato": ["order_id", "order_date"],
+                    "pos": ["paytm_counter"]
+                },
+                "conditions": {
+                    "zomato": [
+                        {
+                            "column": "order_id",
+                            "operator": "not_equal",
+                            "value": "NULL"
+                        }
+                    ],
+                    "pos": [
+                        {
+                            "column": "sales_type",
+                            "operator": "equal",
+                            "value": "ZOMATO"
+                        }
+                    ]
+                }
             }
         }
 
@@ -1483,6 +1711,26 @@ class UpdateReportFormulasResponse(BaseModel):
                 {"formula_name": "pos_order_id", "formula_value": "pos.order_id"},
                 {"formula_name": "zomato_order_id", "formula_value": "zomato.order_id"}
             ],
+            "mapping_keys": {
+                "zomato": ["order_id", "order_date"],
+                "pos": ["paytm_counter"]
+            },
+            "conditions": {
+                "zomato": [
+                    {
+                        "column": "order_id",
+                        "operator": "not_equal",
+                        "value": "NULL"
+                    }
+                ],
+                "pos": [
+                    {
+                        "column": "sales_type",
+                        "operator": "equal",
+                        "value": "ZOMATO"
+                    }
+                ]
+            },
             "mongodb_connected": True
         }
     )
@@ -1643,10 +1891,17 @@ async def update_report_formulas(
     """
     # Convert FormulaItem Pydantic models to dictionaries
     formulas_dict = [f.model_dump() for f in request.formulas]
+    # Convert ConditionItem Pydantic models to dictionaries
+    conditions_dict = {
+        key: [c.model_dump() for c in conditions_list]
+        for key, conditions_list in request.conditions.items()
+    }
     
     return await formulas_controller.update_report_formulas(
         report_name,
-        formulas_dict
+        formulas_dict,
+        request.mapping_keys,
+        conditions_dict
     )
 
 

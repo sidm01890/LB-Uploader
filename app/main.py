@@ -46,6 +46,29 @@ async def run_scheduled_processing_job():
     except Exception as e:
         logging.error(f"❌ Error in scheduled processing job: {e}", exc_info=True)
 
+async def run_scheduled_formula_calculation_job():
+    """
+    Scheduled function that runs the formula calculation job
+    This function processes all reports based on formulas collection
+    """
+    try:
+        logging.info("🔄 Starting scheduled formula calculation job...")
+        result = await scheduled_jobs_controller.process_formula_calculations()
+        
+        if result.get("status") == 200:
+            data = result.get("data", {})
+            reports_processed = data.get("reports_processed", 0)
+            total_documents = data.get("total_documents_processed", 0)
+            logging.info(
+                f"✅ Formula calculation job completed: {reports_processed} report(s) processed, "
+                f"{total_documents} document(s) processed"
+            )
+        else:
+            logging.warning(f"⚠️ Formula calculation job completed with status: {result.get('status')}")
+            
+    except Exception as e:
+        logging.error(f"❌ Error in scheduled formula calculation job: {e}", exc_info=True)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -58,20 +81,29 @@ async def lifespan(app: FastAPI):
     # Start scheduled job processing
     # Get interval from config or default to 5 minutes
     # You can configure this via environment variable: SCHEDULED_JOB_INTERVAL_MINUTES
-    job_interval_minutes = int(os.getenv("SCHEDULED_JOB_INTERVAL_MINUTES", "5"))
+    job_interval_minutes = int(os.getenv("SCHEDULED_JOB_INTERVAL_MINUTES", "2"))
     
-    # Add scheduled job to run at specified interval
-    scheduler.add_job(
-        run_scheduled_processing_job,
-        trigger=IntervalTrigger(minutes=job_interval_minutes),
-        id="collection_data_processing",
-        name="Collection Data Processing Job",
-        replace_existing=True
-    )
+    # Get formula calculation interval (default to same as collection processing)
+    # You can configure this via environment variable: FORMULA_CALCULATION_INTERVAL_MINUTES
+    formula_job_interval_minutes = int(os.getenv("FORMULA_CALCULATION_INTERVAL_MINUTES", str(job_interval_minutes)))
+    
+    # Collection data processing now happens immediately after file upload (not scheduled)
+    # Only formula calculation runs on schedule
+    
+    # Add scheduled job for formula calculations
+    # scheduler.add_job(
+    #     run_scheduled_formula_calculation_job,
+    #     trigger=IntervalTrigger(minutes=formula_job_interval_minutes),
+    #     id="formula_calculation",
+    #     name="Formula Calculation Job",
+    #     replace_existing=True
+    # )
     
     # Start the scheduler
-    # scheduler.start()
-    logging.info(f"✅ Scheduled job processing started - running every {job_interval_minutes} minute(s)")
+    scheduler.start()
+    logging.info(f"✅ Scheduled job processing started:")
+    logging.info(f"   - Formula Calculation: every {formula_job_interval_minutes} minute(s)")
+    logging.info(f"   - Collection Data Processing: runs immediately after file upload")
     
     yield
     
