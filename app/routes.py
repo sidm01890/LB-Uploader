@@ -1095,6 +1095,14 @@ class ConditionItem(BaseModel):
     value: Any = Field(..., description="Value to compare against", example="NULL")
 
 
+class FormulaConditionItem(BaseModel):
+    """Model for a single formula condition"""
+    conditionType: str = Field(..., description="Type of condition (e.g., 'between')", example="between")
+    value1: Optional[str] = Field(default=None, description="First value for condition", example="10")
+    value2: Optional[str] = Field(default=None, description="Second value for condition (used in 'between' type)", example="200")
+    formulaValue: Optional[str] = Field(default=None, description="Formula value for condition", example="50")
+
+
 class FormulaItem(BaseModel):
     """Model for a single formula"""
     id: int = Field(..., description="Formula ID", example=1)
@@ -1103,6 +1111,7 @@ class FormulaItem(BaseModel):
     formulaText: str = Field(..., description="Formula text expression", example="zomato.zvd + zomato.merchant_pack_charge")
     logicNameKey: str = Field(..., description="Logic name key", example="TOTAL_AMOUNT")
     multipleColumn: bool = Field(default=False, description="Whether formula uses multiple columns")
+    conditions: List[FormulaConditionItem] = Field(default_factory=list, description="List of conditions for this formula", example=[])
     active_group_index: int = Field(default=0, description="Active group index", example=0)
     excelFormulaText: str = Field(default="", description="Excel formula text", example=" zomato.zvd + zomato.merchant_pack_charge")
     
@@ -1127,6 +1136,14 @@ class FormulaItem(BaseModel):
                 "formulaText": "zomato.zvd + zomato.merchant_pack_charge",
                 "logicNameKey": "TOTAL_AMOUNT",
                 "multipleColumn": False,
+                "conditions": [
+                    {
+                        "conditionType": "between",
+                        "value1": "10",
+                        "value2": "200",
+                        "formulaValue": "50"
+                    }
+                ],
                 "active_group_index": 0,
                 "excelFormulaText": " zomato.zvd + zomato.merchant_pack_charge"
             }

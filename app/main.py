@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 import time
 import logging
 import os
@@ -14,13 +15,34 @@ from app.core.environment import get_environment
 # Import scheduler and controller for scheduled jobs
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.jobstores.memory import MemoryJobStore
+from apscheduler.executors.asyncio import AsyncIOExecutor
 from app.controllers.scheduled_jobs_controller import ScheduledJobsController
 
 # Setup logging with environment-aware level
 setup_logging(config.log_level)
 
-# Initialize scheduler and controller
-scheduler = AsyncIOScheduler()
+# Initialize scheduler with proper configuration
+jobstores = {
+    'default': MemoryJobStore()
+}
+
+executors = {
+    'default': AsyncIOExecutor(),
+}
+
+job_defaults = {
+    'coalesce': False,
+    'max_instances': 1,
+    'misfire_grace_time': 300  # 5 minutes
+}
+
+scheduler = AsyncIOScheduler(
+    jobstores=jobstores,
+    executors=executors,
+    job_defaults=job_defaults,
+    timezone=timezone.utc  # Use UTC timezone for consistency
+)
 scheduled_jobs_controller = ScheduledJobsController()
 
 async def run_scheduled_processing_job():
@@ -53,6 +75,14 @@ async def run_scheduled_formula_calculation_job():
     """
     try:
         logging.info("🔄 Starting scheduled formula calculation job...")
+        
+        # Check MongoDB connection before processing
+        from app.services.mongodb_service import mongodb_service
+        if not mongodb_service.is_connected():
+            logging.error("❌ MongoDB is not connected. Skipping formula calculation job.")
+            logging.warning("⚠️ Please check MongoDB connection and network settings.")
+            return
+        
         result = await scheduled_jobs_controller.process_formula_calculations()
         
         if result.get("status") == 200:
@@ -66,6 +96,9 @@ async def run_scheduled_formula_calculation_job():
         else:
             logging.warning(f"⚠️ Formula calculation job completed with status: {result.get('status')}")
             
+    except ConnectionError as e:
+        logging.error(f"❌ Network/Connection error in scheduled formula calculation job: {e}", exc_info=True)
+        logging.warning("⚠️ This might be a network issue. Check MongoDB connectivity.")
     except Exception as e:
         logging.error(f"❌ Error in scheduled formula calculation job: {e}", exc_info=True)
 
@@ -79,31 +112,75 @@ async def lifespan(app: FastAPI):
         logging.info("API Documentation available at /docs")
     
     # Start scheduled job processing
-    # Get interval from config or default to 5 minutes
-    # You can configure this via environment variable: SCHEDULED_JOB_INTERVAL_MINUTES
-    job_interval_minutes = int(os.getenv("SCHEDULED_JOB_INTERVAL_MINUTES", "2"))
+    # Formula calculation schedule:
+    # - First run: 2 minutes after startup (configurable via FORMULA_JOB_FIRST_RUN_DELAY_MINUTES)
+    # - Subsequent runs: every 2 hours (configurable via FORMULA_JOB_INTERVAL_HOURS)
+    first_run_delay_minutes = int(os.getenv("FORMULA_JOB_FIRST_RUN_DELAY_MINUTES", "1"))
+    formula_job_interval_hours = float(os.getenv("FORMULA_JOB_INTERVAL_HOURS", "2"))
     
-    # Get formula calculation interval (default to same as collection processing)
-    # You can configure this via environment variable: FORMULA_CALCULATION_INTERVAL_MINUTES
-    formula_job_interval_minutes = int(os.getenv("FORMULA_CALCULATION_INTERVAL_MINUTES", str(job_interval_minutes)))
+    # Start the scheduler FIRST (before adding jobs)
+    try:
+        if not scheduler.running:
+            scheduler.start()
+            logging.info("✅ Scheduler started successfully")
+        else:
+            logging.warning("⚠️ Scheduler is already running")
+    except Exception as e:
+        logging.error(f"❌ Failed to start scheduler: {e}", exc_info=True)
+        raise
     
-    # Collection data processing now happens immediately after file upload (not scheduled)
-    # Only formula calculation runs on schedule
+    # Use timezone-aware datetime for scheduler
+    current_time = datetime.now(timezone.utc)
+    first_run_time = current_time + timedelta(minutes=first_run_delay_minutes)
     
-    # Add scheduled job for formula calculations
-    # scheduler.add_job(
-    #     run_scheduled_formula_calculation_job,
-    #     trigger=IntervalTrigger(minutes=formula_job_interval_minutes),
-    #     id="formula_calculation",
-    #     name="Formula Calculation Job",
-    #     replace_existing=True
-    # )
+    # Ensure first_run_time is at least a few seconds in the future
+    if first_run_time <= current_time:
+        first_run_time = current_time + timedelta(seconds=10)
+        logging.warning(f"⚠️ Adjusted first_run_time to be in the future: {first_run_time}")
     
-    # Start the scheduler
-    scheduler.start()
-    logging.info(f"✅ Scheduled job processing started:")
-    logging.info(f"   - Formula Calculation: every {formula_job_interval_minutes} minute(s)")
-    logging.info(f"   - Collection Data Processing: runs immediately after file upload")
+    logging.info(f"Current time (UTC): {current_time}")
+    logging.info(f"First run time (UTC): {first_run_time}")
+    logging.info(f"Delay configured: {first_run_delay_minutes} minute(s)")
+    logging.info(f"Time until first run: {(first_run_time - current_time).total_seconds()} seconds")
+    
+    try:
+        # Remove existing job if it exists (extra safety)
+        try:
+            scheduler.remove_job("formula_calculation")
+            logging.info("Removed existing formula_calculation job")
+        except Exception:
+            pass  # Job doesn't exist, that's fine
+        
+        scheduler.add_job(
+            run_scheduled_formula_calculation_job,
+            trigger=IntervalTrigger(hours=formula_job_interval_hours, start_date=first_run_time),
+            id="formula_calculation",
+            name="Formula Calculation Job",
+            replace_existing=True
+        )
+        logging.info("✅ Formula calculation job added to scheduler")
+    except Exception as e:
+        logging.error(f"❌ Failed to add formula calculation job: {e}", exc_info=True)
+        raise
+    
+    # Verify scheduler is running and log job details
+    if scheduler.running:
+        logging.info("✅ Scheduled job processing started:")
+        logging.info(f"   - Formula Calculation: first run in {first_run_delay_minutes} minute(s), then every {formula_job_interval_hours} hour(s)")
+        logging.info("   - Collection Data Processing: runs immediately after file upload")
+        # Log scheduled jobs with detailed info
+        jobs = scheduler.get_jobs()
+        logging.info(f"   - Total scheduled jobs: {len(jobs)}")
+        for job in jobs:
+            next_run = job.next_run_time
+            if next_run:
+                time_until_run = (next_run - datetime.now(timezone.utc)).total_seconds()
+                logging.info(f"      * {job.name} (id: {job.id})")
+                logging.info(f"        Next run: {next_run} (in {time_until_run:.1f} seconds / {time_until_run/60:.1f} minutes)")
+            else:
+                logging.info(f"      * {job.name} (id: {job.id}, next run: None)")
+    else:
+        logging.error("❌ Scheduler is not running after startup")
     
     yield
     
