@@ -10,6 +10,7 @@ from datetime import datetime
 import re
 import asyncio
 import os
+import gc
 
 from app.services.mongodb_service import mongodb_service
 
@@ -22,7 +23,9 @@ class ScheduledJobsController:
     def __init__(self):
         # Configurable batch processing settings
         # These can be adjusted via environment variables if needed
-        self.batch_size = int(os.getenv("SCHEDULED_JOB_BATCH_SIZE", "5000"))  # Reduced to prevent blocking
+        # Reduced batch size for formula calculations to handle large datasets (800K+ records)
+        self.batch_size = int(os.getenv("SCHEDULED_JOB_BATCH_SIZE", "5000"))  # Default for regular processing
+        self.formula_batch_size = int(os.getenv("FORMULA_JOB_BATCH_SIZE", "1000"))  # Smaller batch for formula calculations
         self.batch_delay_seconds = float(os.getenv("SCHEDULED_JOB_BATCH_DELAY", "0.01"))  # Delay between batches
     
     def _sanitize_date(self, value: Any) -> Optional[datetime]:
@@ -106,8 +109,7 @@ class ScheduledJobsController:
                 except ValueError:
                     continue
         
-        # If all parsing fails, log warning and return None
-        logger.warning(f"⚠️ Could not parse date value: {value}")
+        # If all parsing fails, return None
         return None
     
     def _sanitize_value(self, value: Any, field_name: str) -> Any:
@@ -801,29 +803,65 @@ class ScheduledJobsController:
         Parse formula text to extract collection name and field references
         
         Args:
-            formula_text: Formula text like "zomato.net_amount + zomato.merchant_pack_charge"
+            formula_text: Formula text like "zomato.net_amount + zomato.merchant_pack_charge" or "CALCULATED_NET_AMOUNT + TAX_PAID_BY_CUSTOMER"
         
         Returns:
             Dictionary with:
                 - source_collection: Primary collection name for this formula (first one found, e.g., "zomato" -> "zomato_processed")
                 - field_references: List of field names referenced
-                - calculated_field_references: List of calculated field names referenced
+                - calculated_field_references: List of calculated field names referenced (uppercase standalone fields)
                 - all_collections: All collections referenced (base names, without _processed)
         """
-        collection_field_pattern = r'(\w+)\.(\w+)'
+        # Pattern to match collection.field but NOT numeric patterns like 0.05, 1.5, etc.
+        # Collection name must start with a letter or underscore (not a digit)
+        # This prevents matching "0.05" as "collection=0, field=05"
+        collection_field_pattern = r'([a-zA-Z_]\w*)\.(\w+)'
         matches = re.findall(collection_field_pattern, formula_text)
         
         source_collections = []
         field_references = set()
         calculated_field_references = set()
         
+        # Extract collection.field references
         for collection_name, field_name in matches:
+            # Additional check: skip if collection name is all digits (shouldn't happen with new pattern, but safety check)
+            if collection_name.isdigit():
+                continue
+                
             if field_name.isupper() or field_name.startswith('CALCULATED_'):
-                calculated_field_references.add(field_name.lower())
+                calculated_field_references.add(field_name.upper())
             else:
                 if collection_name not in source_collections:
                     source_collections.append(collection_name)
                 field_references.add(field_name)
+        
+        # Extract standalone calculated field references (uppercase identifiers with underscores)
+        # Pattern matches: CALCULATED_NET_AMOUNT, TAX_PAID_BY_CUSTOMER, PG_APPLIED_ON, etc.
+        # But exclude numbers, operators, and collection.field patterns
+        standalone_calc_pattern = r'\b([A-Z][A-Z0-9_]{2,})\b'
+        standalone_matches = re.findall(standalone_calc_pattern, formula_text)
+        
+        # Get all collection.field patterns to exclude them
+        collection_field_patterns = set()
+        for coll, field in matches:
+            collection_field_patterns.add(f"{coll}.{field}")
+        
+        for calc_ref in standalone_matches:
+            # Skip if it's part of a collection.field pattern (e.g., "zomato.CALCULATED_NET_AMOUNT")
+            # Check if this reference appears as "collection.calc_ref" pattern
+            is_collection_field = False
+            for coll, field in matches:
+                if calc_ref.upper() == field.upper():
+                    is_collection_field = True
+                    break
+            
+            # Also check if it appears as part of a collection.field pattern in the text
+            if not is_collection_field:
+                # Check if there's a dot before or after this reference (indicating collection.field)
+                pattern_before = r'\w+\.' + re.escape(calc_ref) + r'\b'
+                pattern_after = r'\b' + re.escape(calc_ref) + r'\.\w+'
+                if not (re.search(pattern_before, formula_text) or re.search(pattern_after, formula_text)):
+                    calculated_field_references.add(calc_ref.upper())
         
         source_collection = None
         if source_collections:
@@ -835,6 +873,97 @@ class ScheduledJobsController:
             "calculated_field_references": list(calculated_field_references),
             "all_collections": source_collections
         }
+    
+    def _sort_formulas_by_dependencies(self, formulas: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Sort formulas by their dependencies using topological sort.
+        Formulas that depend on other calculated fields will be processed after their dependencies.
+        
+        Args:
+            formulas: List of formula dictionaries
+        
+        Returns:
+            Sorted list of formulas in dependency order
+        """
+        # Build dependency graph and formula index
+        formula_index = {}  # Maps logicNameKey -> formula
+        formula_dependencies = {}  # Maps logicNameKey -> set of dependencies
+        formula_outputs = {}  # Maps logicNameKey -> formula index in original list
+        
+        for idx, formula in enumerate(formulas):
+            logic_name_key = formula.get('logicNameKey', '')
+            if not logic_name_key:
+                continue
+            
+            logic_name_key_upper = logic_name_key.upper()
+            formula_index[logic_name_key_upper] = formula
+            formula_outputs[logic_name_key_upper] = idx
+            
+            # Parse formula to get dependencies
+            formula_text = formula.get('formulaText', '')
+            meta = self._parse_formula_text(formula_text)
+            calculated_deps = meta.get('calculated_field_references', [])
+            formula_dependencies[logic_name_key_upper] = set(calculated_deps)
+        
+        # Topological sort using Kahn's algorithm
+        # Count how many formulas each formula depends on (incoming edges)
+        dependency_count = {key: 0 for key in formula_index.keys()}
+        for formula_key, deps in formula_dependencies.items():
+            for dep in deps:
+                if dep in formula_index:  # Only count dependencies that are actually formulas
+                    dependency_count[formula_key] = dependency_count.get(formula_key, 0) + 1
+        
+        # Start with formulas that have no dependencies (dependency_count = 0)
+        queue = [key for key, count in dependency_count.items() if count == 0]
+        sorted_formulas = []
+        processed = set()
+        
+        # If no formulas have zero dependencies, use original order (circular dependency case)
+        if not queue:
+            logger.warning("⚠️ Circular dependency detected or all formulas depend on others. Using original order.")
+            return formulas
+        
+        while queue:
+            # Sort queue by original index to maintain relative order for formulas at same level
+            queue.sort(key=lambda k: formula_outputs.get(k, 9999))
+            
+            current = queue.pop(0)
+            if current in processed:
+                continue
+            
+            processed.add(current)
+            formula = formula_index[current]
+            sorted_formulas.append(formula)
+            
+            # Find formulas that depend on current formula and reduce their dependency count
+            for formula_key, deps in formula_dependencies.items():
+                if current in deps:
+                    dependency_count[formula_key] = dependency_count.get(formula_key, 1) - 1
+                    if dependency_count[formula_key] == 0 and formula_key not in processed:
+                        queue.append(formula_key)
+        
+        # Add any remaining formulas that weren't processed (shouldn't happen, but safety)
+        for formula in formulas:
+            logic_name_key = formula.get('logicNameKey', '')
+            if logic_name_key and logic_name_key.upper() not in processed:
+                sorted_formulas.append(formula)
+                logger.warning(f"⚠️ Formula '{logic_name_key}' was not included in dependency sort, appending at end")
+        
+        # Log the sorted order
+        if len(sorted_formulas) != len(formulas):
+            logger.warning(f"⚠️ Formula count mismatch after sorting: {len(sorted_formulas)} vs {len(formulas)}")
+        else:
+            logger.info("✅ Formulas sorted by dependencies:")
+            for idx, formula in enumerate(sorted_formulas, 1):
+                logic_name_key = formula.get('logicNameKey', '')
+                formula_text = formula.get('formulaText', '')
+                deps = formula_dependencies.get(logic_name_key.upper(), set())
+                if deps:
+                    logger.info(f"  {idx}. {logic_name_key} (depends on: {', '.join(sorted(deps))}) = {formula_text}")
+                else:
+                    logger.info(f"  {idx}. {logic_name_key} (no dependencies) = {formula_text}")
+        
+        return sorted_formulas
     
     def _build_mapping_key(self, document: Dict[str, Any], key_fields: List[str]) -> Optional[str]:
         """
@@ -1017,7 +1146,7 @@ class ScheduledJobsController:
                     value_str = str(calc_value) if calc_value is not None else "0"
                     # Replace all occurrences
                     evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
-                    logger.debug(f"Replaced {upper_key} with {value_str} in formula")
+                    
             
             # Also try replacing with original case (in case formula uses lowercase)
             for calc_key, calc_value in calculated_fields.items():
@@ -1030,7 +1159,7 @@ class ScheduledJobsController:
                 if re.search(pattern, evaluated_formula):
                     value_str = str(calc_value) if calc_value is not None else "0"
                     evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
-                    logger.debug(f"Replaced {calc_key} with {value_str} in formula")
+                    
             
             # Step 3: Check for any remaining calculated field references that weren't replaced
             # Extract all potential calculated field references (uppercase identifiers with underscores)
@@ -1251,10 +1380,17 @@ class ScheduledJobsController:
             collection_order: List[str] = []
             formulas_without_collection = []  # Formulas that don't reference any collection.field pattern
             
+
             for formula in formulas:
-                meta = self._parse_formula_text(formula.get("formulaText", ""))
+                formula_text = formula.get("formulaText", "")
+                logic_name_key = formula.get("logicNameKey", "N/A")
+                meta = self._parse_formula_text(formula_text)
                 source_collection = meta.get("source_collection")
                 meta["formula"] = formula
+                
+                logger.debug(f"📋 Parsed formula '{logic_name_key}': source_collection={source_collection}, "
+                           f"calc_refs={meta.get('calculated_field_references', [])}")
+                
                 if source_collection and source_collection not in collection_order:
                     collection_order.append(source_collection)
                 formulas_meta.append(meta)
@@ -1264,11 +1400,16 @@ class ScheduledJobsController:
             formulas_by_collection: Dict[str, List[Dict[str, Any]]] = {}
             for meta in formulas_meta:
                 source_collection = meta.get("source_collection")
+                formula = meta["formula"]
+                logic_name_key = formula.get("logicNameKey", "N/A")
+                
                 if source_collection:
-                    formulas_by_collection.setdefault(source_collection, []).append(meta["formula"])
+                    formulas_by_collection.setdefault(source_collection, []).append(formula)
+                    logger.debug(f"📋 Added formula '{logic_name_key}' to collection '{source_collection}'")
                 else:
                     # Formulas without source_collection should be processed with the primary collection
-                    formulas_without_collection.append(meta["formula"])
+                    formulas_without_collection.append(formula)
+                    logger.debug(f"📋 Added formula '{logic_name_key}' to formulas_without_collection (no source_collection)")
             
             # If no collections found but we have formulas, we need at least one collection to process
             # Try to determine primary collection from mapping_keys
@@ -1302,12 +1443,22 @@ class ScheduledJobsController:
             primary_base_name = primary_collection_name.replace("_processed", "")
             primary_mapping_key_field = f"{primary_base_name}_mapping_key"
             
+            logger.info(f"📋 Formulas without collection: {[f.get('logicNameKey', 'N/A') for f in formulas_without_collection]}")
+            
             # Add formulas without collection to the primary collection's formula list
             if formulas_without_collection:
                 if primary_collection_name not in formulas_by_collection:
                     formulas_by_collection[primary_collection_name] = []
                 formulas_by_collection[primary_collection_name].extend(formulas_without_collection)
                 logger.info(f"ℹ️ Added {len(formulas_without_collection)} formula(s) without collection reference to primary collection '{primary_collection_name}'")
+                logger.info(f"📋 Formulas added: {[f.get('logicNameKey', 'N/A') for f in formulas_without_collection]}")
+            
+            # Log formulas_by_collection after adding formulas without collection
+            logger.info(f"📋 Formulas by collection AFTER adding formulas without collection:")
+            for coll_name, coll_formulas in formulas_by_collection.items():
+                logger.info(f"  Collection '{coll_name}': {len(coll_formulas)} formulas")
+                for f in coll_formulas:
+                    logger.info(f"    - {f.get('logicNameKey', 'N/A')} = {f.get('formulaText', 'N/A')}")
             
             # Ensure primary is first, others follow in discovery order
             collections_to_process = collection_order + [c for c in formulas_by_collection.keys() if c not in collection_order]
@@ -1329,7 +1480,8 @@ class ScheduledJobsController:
             # Store formula_outputs for use in error messages
             self._formula_outputs_cache = formula_outputs
             
-            batch_size = self.batch_size
+            # Use smaller batch size for formula calculations to handle large datasets
+            batch_size = self.formula_batch_size
             total_processed = 0
             total_errors = 0
             
@@ -1339,9 +1491,16 @@ class ScheduledJobsController:
                 condition_list = conditions.get(base_name, []) or []
                 collection_formulas = formulas_by_collection.get(collection_name, [])
                 
+                logger.info(f"📋 Processing collection '{collection_name}': Found {len(collection_formulas)} formula(s) before sorting")
+                logger.info(f"📋 Formulas in '{collection_name}' before sorting: {[f.get('logicNameKey', 'N/A') for f in collection_formulas]}")
+                
                 if not collection_formulas:
                     logger.info(f"ℹ️ No formulas for collection '{collection_name}', skipping")
                     continue
+                
+                # Sort formulas by dependencies to ensure calculated fields are available when needed
+                collection_formulas = self._sort_formulas_by_dependencies(collection_formulas)
+                logger.info(f"📋 Formulas in '{collection_name}' after sorting: {[f.get('logicNameKey', 'N/A') for f in collection_formulas]}")
                 
                 source_collection = mongodb_service.db[collection_name]
                 query_filter = self._build_condition_filter(condition_list)
@@ -1354,51 +1513,102 @@ class ScheduledJobsController:
                     f"📋 Processing report '{report_name}' for collection '{collection_name}' "
                     f"with {len(collection_formulas)} formula(s) and mapping keys {mapping_key_fields}"
                 )
+                logger.info(f"📊 Total documents to process: {document_count:,} (batch size: {batch_size})")
                 
                 cursor = source_collection.find(query_filter).batch_size(batch_size)
                 batch_docs: List[tuple] = []
+                batch_number = 0
+                estimated_batches = (document_count + batch_size - 1) // batch_size  # Ceiling division
                 
-                for doc in cursor:
-                    try:
-                        doc.pop('_id', None)
-                        mapping_key_value = self._build_mapping_key(doc, mapping_key_fields)
-                        if mapping_key_value is None:
+                try:
+                    for doc in cursor:
+                        try:
+                            doc.pop('_id', None)
+                            mapping_key_value = self._build_mapping_key(doc, mapping_key_fields)
+                            if mapping_key_value is None:
+                                continue
+                            
+                            batch_docs.append((doc, mapping_key_value))
+                            
+                            if len(batch_docs) >= batch_size:
+                                batch_number += 1
+                                logger.info(
+                                    f"🔄 Processing batch {batch_number}/{estimated_batches} "
+                                    f"for collection '{collection_name}' "
+                                    f"({len(batch_docs)} documents)"
+                                )
+                                
+                                processed, errors = await self._process_formula_batch(
+                                    batch_docs,
+                                    collection_name,
+                                    primary_mapping_key_field,
+                                    primary_collection_name,
+                                    mapping_key_fields,
+                                    collection_formulas,
+                                    target_collection,
+                                    batch_number
+                                )
+                                total_processed += processed
+                                total_errors += errors
+                                
+                                # Clear batch and force garbage collection to free memory
+                                batch_docs = []
+                                del processed, errors
+                                
+                                # Force garbage collection to release memory
+                                gc.collect()
+                                
+                                logger.info(
+                                    f"✅ Batch {batch_number}/{estimated_batches} completed. "
+                                    f"Total processed so far: {total_processed:,}, errors: {total_errors}"
+                                )
+                                
+                                await asyncio.sleep(self.batch_delay_seconds)
+                        except Exception as e:
+                            total_errors += 1
+                            logger.warning(f"⚠️ Error processing document in '{report_name}' for collection '{collection_name}': {e}")
                             continue
+                    
+                    # Final batch
+                    if batch_docs:
+                        batch_number += 1
+                        logger.info(
+                            f"🔄 Processing final batch {batch_number}/{estimated_batches} "
+                            f"for collection '{collection_name}' "
+                            f"({len(batch_docs)} documents)"
+                        )
                         
-                        batch_docs.append((doc, mapping_key_value))
+                        processed, errors = await self._process_formula_batch(
+                            batch_docs,
+                            collection_name,
+                            primary_mapping_key_field,
+                            primary_collection_name,
+                            mapping_key_fields,
+                            collection_formulas,
+                            target_collection,
+                            batch_number
+                        )
+                        total_processed += processed
+                        total_errors += errors
                         
-                        if len(batch_docs) >= batch_size:
-                            processed, errors = await self._process_formula_batch(
-                                batch_docs,
-                                collection_name,
-                                primary_mapping_key_field,
-                                primary_collection_name,
-                                mapping_key_fields,
-                                collection_formulas,
-                                target_collection
-                            )
-                            total_processed += processed
-                            total_errors += errors
-                            batch_docs = []
-                            await asyncio.sleep(self.batch_delay_seconds)
-                    except Exception as e:
-                        total_errors += 1
-                        logger.warning(f"⚠️ Error processing document in '{report_name}' for collection '{collection_name}': {e}")
-                        continue
+                        # Clear batch and force garbage collection
+                        batch_docs = []
+                        del processed, errors
+                        gc.collect()
+                        
+                        logger.info(
+                            f"✅ Final batch {batch_number}/{estimated_batches} completed. "
+                            f"Total processed: {total_processed:,}, errors: {total_errors}"
+                        )
                 
-                # Final batch
-                if batch_docs:
-                    processed, errors = await self._process_formula_batch(
-                        batch_docs,
-                        collection_name,
-                        primary_mapping_key_field,
-                        primary_collection_name,
-                        mapping_key_fields,
-                        collection_formulas,
-                        target_collection
-                    )
-                    total_processed += processed
-                    total_errors += errors
+                finally:
+                    # Ensure cursor is closed and memory is released
+                    if cursor:
+                        cursor.close()
+                    # Clear any remaining references
+                    batch_docs = []
+                    gc.collect()
+                    logger.info(f"🧹 Memory cleanup completed for collection '{collection_name}'")
             
             logger.info(
                 f"✅ Processed {total_processed} documents for report '{report_name}': "
@@ -1426,11 +1636,15 @@ class ScheduledJobsController:
         primary_collection_name: str,
         mapping_key_fields: List[str],
         collection_formulas: List[Dict[str, Any]],
-        target_collection
+        target_collection,
+        batch_number: int = 0
     ) -> tuple:
         """
         Process a batch of documents for a specific collection and upsert into target.
         Returns (processed_count, error_count).
+        
+        Args:
+            batch_number: Batch number for logging purposes
         """
         from pymongo import UpdateOne
         
@@ -1450,11 +1664,16 @@ class ScheduledJobsController:
         )
         existing_map_primary: Dict[str, Dict[str, Any]] = {}
         existing_map_current: Dict[str, Dict[str, Any]] = {}
-        for existing in existing_docs_cursor:
-            if primary_mapping_key_field in existing:
-                existing_map_primary[existing[primary_mapping_key_field]] = existing
-            if current_mapping_key_field in existing:
-                existing_map_current[existing[current_mapping_key_field]] = existing
+        try:
+            for existing in existing_docs_cursor:
+                if primary_mapping_key_field in existing:
+                    existing_map_primary[existing[primary_mapping_key_field]] = existing
+                if current_mapping_key_field in existing:
+                    existing_map_current[existing[current_mapping_key_field]] = existing
+        finally:
+            # Ensure cursor is closed
+            if existing_docs_cursor:
+                existing_docs_cursor.close()
         
         bulk_operations = []
         processed_count = 0
@@ -1468,14 +1687,15 @@ class ScheduledJobsController:
                 if existing_doc:
                     calculated_fields.update({k: v for k, v in existing_doc.items() if not k.startswith("_")})
                 
-                # Log formula processing order for debugging
-                formula_order = []
-                for idx, f in enumerate(collection_formulas):
-                    logic_name_key = f.get('logicNameKey', '')
-                    if logic_name_key:
-                        formula_order.append(f"{idx + 1}. {logic_name_key}")
-                if formula_order:
-                    logger.info(f"📝 Formula processing order for collection '{current_collection}': {', '.join(formula_order)}")
+                # Only log formula processing order for first batch to reduce log noise
+                if batch_number == 1:
+                    formula_order = []
+                    for idx, f in enumerate(collection_formulas):
+                        logic_name_key = f.get('logicNameKey', '')
+                        if logic_name_key:
+                            formula_order.append(f"{idx + 1}. {logic_name_key}")
+                    if formula_order:
+                        logger.debug(f"📝 Formula processing order for collection '{current_collection}': {', '.join(formula_order)}")
                 
                 for formula_idx, formula in enumerate(collection_formulas):
                     logic_name_key = formula.get('logicNameKey', '')
@@ -1488,11 +1708,12 @@ class ScheduledJobsController:
                     
                     calculated_field_name = logic_name_key.lower()
                     
-                    # Log available calculated fields before evaluation (for debugging)
-                    available_calc_fields = [k.upper() for k in calculated_fields.keys() 
-                                          if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
-                    logger.info(f"[{formula_idx + 1}/{len(collection_formulas)}] Evaluating formula '{logic_name_key}': {formula_text}")
-                    logger.debug(f"Available calculated fields: {available_calc_fields}")
+                    # Reduced logging - only log for first document of first batch
+                    if batch_number == 1 and processed_count == 0 and formula_idx == 0:
+                        available_calc_fields = [k.upper() for k in calculated_fields.keys() 
+                                              if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
+                        logger.debug(f"[Batch {batch_number}] Evaluating formula '{logic_name_key}': {formula_text}")
+                        logger.debug(f"Available calculated fields: {available_calc_fields}")
                     
                     calculated_value = self._evaluate_formula(
                         formula_text,
@@ -1506,7 +1727,6 @@ class ScheduledJobsController:
                         calculated_value = 0
                     
                     calculated_fields[calculated_field_name] = calculated_value
-                    logger.info(f"✅ [{formula_idx + 1}/{len(collection_formulas)}] Calculated {logic_name_key} = {calculated_value}")
                 
                 calculated_fields[current_mapping_key_field] = mapping_key_value
                 calculated_fields['processed_at'] = datetime.utcnow()
@@ -1539,8 +1759,14 @@ class ScheduledJobsController:
             try:
                 target_collection.bulk_write(bulk_operations, ordered=False)
             except Exception as bulk_error:
-                logger.error(f"❌ Error executing bulk operations for collection '{current_collection}': {bulk_error}")
+                logger.error(f"❌ Error executing bulk operations for collection '{current_collection}' in batch {batch_number}: {bulk_error}")
                 error_count += len(bulk_operations)
+        
+        # Clear large data structures to free memory
+        batch_keys = None
+        existing_map_primary = None
+        existing_map_current = None
+        bulk_operations = None
         
         return processed_count, error_count
 

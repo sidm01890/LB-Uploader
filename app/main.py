@@ -72,9 +72,16 @@ async def run_scheduled_formula_calculation_job():
     """
     Scheduled function that runs the formula calculation job
     This function processes all reports based on formulas collection
+    Processes large datasets (800K+ records) in memory-efficient batches
     """
+    import gc
+    import time
+    
+    start_time = time.time()
+    
     try:
         logging.info("🔄 Starting scheduled formula calculation job...")
+        logging.info("💾 Memory-efficient batch processing enabled for large datasets")
         
         # Check MongoDB connection before processing
         from app.services.mongodb_service import mongodb_service
@@ -83,7 +90,15 @@ async def run_scheduled_formula_calculation_job():
             logging.warning("⚠️ Please check MongoDB connection and network settings.")
             return
         
+        # Force garbage collection before starting to free any unused memory
+        gc.collect()
+        
         result = await scheduled_jobs_controller.process_formula_calculations()
+        
+        # Force garbage collection after processing to free memory
+        gc.collect()
+        
+        elapsed_time = time.time() - start_time
         
         if result.get("status") == 200:
             data = result.get("data", {})
@@ -91,16 +106,23 @@ async def run_scheduled_formula_calculation_job():
             total_documents = data.get("total_documents_processed", 0)
             logging.info(
                 f"✅ Formula calculation job completed: {reports_processed} report(s) processed, "
-                f"{total_documents} document(s) processed"
+                f"{total_documents:,} document(s) processed in {elapsed_time:.2f} seconds"
             )
         else:
-            logging.warning(f"⚠️ Formula calculation job completed with status: {result.get('status')}")
+            logging.warning(
+                f"⚠️ Formula calculation job completed with status: {result.get('status')} "
+                f"in {elapsed_time:.2f} seconds"
+            )
             
     except ConnectionError as e:
         logging.error(f"❌ Network/Connection error in scheduled formula calculation job: {e}", exc_info=True)
         logging.warning("⚠️ This might be a network issue. Check MongoDB connectivity.")
     except Exception as e:
         logging.error(f"❌ Error in scheduled formula calculation job: {e}", exc_info=True)
+    finally:
+        # Final memory cleanup
+        gc.collect()
+        logging.debug("🧹 Final memory cleanup completed after formula calculation job")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
