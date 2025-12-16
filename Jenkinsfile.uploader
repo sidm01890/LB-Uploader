@@ -25,8 +25,9 @@ pipeline {
                     echo "📦 Checking out code from branch: ${GIT_BRANCH}..."
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: "*/${GIT_BRANCH}"]],
-                        userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']]
+                        branches: [[name: "${GIT_BRANCH}"]],
+                        userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']],
+                        extensions: [[$class: 'CleanCheckout']]
                     ])
                 }
             }
