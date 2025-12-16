@@ -1,0 +1,120 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(
+            name: 'BRANCH',
+            defaultValue: 'main',
+            description: 'Enter branch name to deploy (default: main)'
+        )
+    }
+    
+    environment {
+        SERVER_HOST = '65.0.236.144'
+        SERVER_USER = 'ubuntu'
+        SSH_KEY = credentials('ssh-key')
+        PROJECT_DIR = '/home/ubuntu/LaughingBuddha'
+        SERVICE_NAME = 'uploader'
+        GIT_BRANCH = "${params.BRANCH}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "📦 Checking out code from branch: ${GIT_BRANCH}..."
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${GIT_BRANCH}"]],
+                        userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']]
+                    ])
+                }
+            }
+        }
+        
+        stage('Verify Changes') {
+            steps {
+                script {
+                    echo "🔍 Verifying changes from branch: ${GIT_BRANCH}..."
+                    sh '''
+                        git log --oneline -5
+                        git status
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Server') {
+            steps {
+                script {
+                    echo "🚀 Deploying ${SERVICE_NAME} to server..."
+                    sshagent([SSH_KEY]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_HOST} << DEPLOY_EOF
+                                cd ${PROJECT_DIR}
+                                
+                                # Pull latest changes in Uploader directory
+                                cd Uploader
+                                git fetch origin
+                                git checkout ${GIT_BRANCH}
+                                git pull origin ${GIT_BRANCH}
+                                
+                                # Go back to project root
+                                cd ..
+                                
+                                # Stop and remove container
+                                docker compose -f docker-compose.staging.yml stop ${SERVICE_NAME}
+                                docker compose -f docker-compose.staging.yml rm -f ${SERVICE_NAME}
+                                
+                                # Rebuild image
+                                docker compose -f docker-compose.staging.yml build ${SERVICE_NAME}
+                                
+                                # Start container
+                                docker compose -f docker-compose.staging.yml up -d ${SERVICE_NAME}
+                                
+                                # Wait for startup
+                                sleep 25
+                                
+                                # Verify deployment
+                                docker ps | grep ${SERVICE_NAME}
+                                docker logs ${SERVICE_NAME} | tail -10
+                            DEPLOY_EOF
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    echo "✅ Verifying deployment..."
+                    sshagent([SSH_KEY]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${SERVER_HOST} << 'VERIFY_EOF'
+                                # Check container status
+                                docker ps | grep ${SERVICE_NAME}
+                                
+                                # Test health endpoint
+                                docker exec ${SERVICE_NAME} curl -s http://localhost:8010/api/health || echo "Health check failed"
+                                
+                                # Check MongoDB connection
+                                docker exec ${SERVICE_NAME} python3 -c "from app.core.config import config; print(f'MongoDB: {config.mongodb.host}')" || echo "Config check failed"
+                            VERIFY_EOF
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Deployment successful!"
+        }
+        failure {
+            echo "❌ Deployment failed!"
+        }
+    }
+}
+
