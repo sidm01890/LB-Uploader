@@ -119,6 +119,9 @@ class DataController:
         try:
             logger.info(f"🔄 Starting background processing for file: {filename}")
             
+            # Get file size for metadata (if needed later)
+            file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            
             # Update status to "processing" if upload_id is provided
             if upload_id:
                 mongodb_service.update_upload_status(
@@ -204,61 +207,107 @@ class DataController:
                                 f"got {len(row_data):,} rows"
                             )
                     
-                    return row_data, columns_count
+                    # Return row_data, columns_count, and normalized column names
+                    normalized_column_names = list(df.columns)
+                    return row_data, columns_count, normalized_column_names
                 
                 # Run CPU-intensive operations in thread pool (non-blocking)
-                row_data, columns_count = await loop.run_in_executor(
+                row_data, columns_count, normalized_column_names = await loop.run_in_executor(
                     self.executor,
                     _read_and_process_file
                 )
                 
                 logger.info(f"📊 Parsed file: {columns_count} columns, {len(row_data):,} rows ready for MongoDB")
                 
+                # Handle empty file (only headers, no data rows)
+                if not row_data:
+                    logger.info(f"📋 File contains only headers (no data rows). Storing headers in raw_data_collection.")
+                    
+                    # Get normalized column names (headers) - these are already normalized from _read_and_process_file
+                    normalized_headers = normalized_column_names
+                    
+                    # Store headers in raw_data_collection as total_fields
+                    try:
+                        raw_data_collection = mongodb_service.db["raw_data_collection"]
+                        collection_name_lower = datasource.lower()
+                        
+                        # Update or create document in raw_data_collection
+                        raw_data_collection.update_one(
+                            {"collection_name": collection_name_lower},
+                            {
+                                "$set": {
+                                    "total_fields": normalized_headers,
+                                    "updated_at": datetime.utcnow()
+                                },
+                                "$setOnInsert": {
+                                    "collection_name": collection_name_lower,
+                                    "created_at": datetime.utcnow()
+                                }
+                            },
+                            upsert=True
+                        )
+                        logger.info(f"✅ Stored {len(normalized_headers)} header(s) in raw_data_collection for '{collection_name_lower}'")
+                    except Exception as e:
+                        logger.error(f"❌ Error storing headers in raw_data_collection: {e}", exc_info=True)
+                    
+                    # Don't process further - file is empty, no data to save, no upload_id needed
+                    return
+                
+                # File has data - create upload_id if not provided
+                if not upload_id:
+                    upload_id = mongodb_service.save_uploaded_file(
+                        filename=filename,
+                        datasource=datasource,
+                        file_path=file_path,
+                        file_size=file_size,
+                        uploaded_by="api_user"
+                    )
+                    if upload_id:
+                        logger.info(f"📝 File metadata saved to MongoDB: upload_id={upload_id}")
+                
+                # Update status to "processing" if upload_id is provided
+                if upload_id:
+                    mongodb_service.update_upload_status(
+                        upload_id=upload_id,
+                        status="processing",
+                        metadata={"processing_started_at": datetime.utcnow()}
+                    )
+                
                 # Save row-wise data to MongoDB collection (collection name = datasource lowercase)
                 # MongoDB service will handle batching internally
-                if row_data:
-                    save_result = mongodb_service.save_excel_data_row_wise(
-                        collection_name=datasource,
-                        row_data=row_data
-                    )
+                save_result = mongodb_service.save_excel_data_row_wise(
+                    collection_name=datasource,
+                    row_data=row_data
+                )
+                
+                if save_result.get("success"):
+                    rows_inserted = save_result.get("rows_inserted", 0)
+                    logger.info(f"✅ Saved {rows_inserted:,} rows to MongoDB collection '{datasource.lower()}'")
                     
-                    if save_result.get("success"):
-                        rows_inserted = save_result.get("rows_inserted", 0)
-                        logger.info(f"✅ Saved {rows_inserted:,} rows to MongoDB collection '{datasource.lower()}'")
-                        
-                        # Update status to "data_saved" if upload_id is provided
-                        if upload_id:
-                            mongodb_service.update_upload_status(
-                                upload_id=upload_id,
-                                status="data_saved",
-                                metadata={
-                                    "data_saved_at": datetime.utcnow(),
-                                    "rows_inserted": rows_inserted,
-                                    "columns_count": save_result.get("columns_count", 0)
-                                }
-                            )
-                        
-                        # Trigger scheduled job processing after data is saved to MongoDB
-                        # Task 3 will only start after Task 2 completes (MongoDB save is done)
-                        # Since Task 2 is already a background task, awaiting Task 3 here won't block the main request thread
-                        await self._process_collection_after_upload(datasource, upload_id)
-                    else:
-                        logger.warning(f"⚠️ Failed to save Excel data to MongoDB: {save_result.get('message')}")
-                        # Update status to "failed" if upload_id is provided
-                        if upload_id:
-                            mongodb_service.update_upload_status(
-                                upload_id=upload_id,
-                                status="failed",
-                                error=save_result.get("message", "Failed to save data to MongoDB")
-                            )
+                    # Update status to "data_saved" if upload_id is provided
+                    if upload_id:
+                        mongodb_service.update_upload_status(
+                            upload_id=upload_id,
+                            status="data_saved",
+                            metadata={
+                                "data_saved_at": datetime.utcnow(),
+                                "rows_inserted": rows_inserted,
+                                "columns_count": save_result.get("columns_count", 0)
+                            }
+                        )
+                    
+                    # Trigger scheduled job processing after data is saved to MongoDB
+                    # Task 3 will only start after Task 2 completes (MongoDB save is done)
+                    # Since Task 2 is already a background task, awaiting Task 3 here won't block the main request thread
+                    await self._process_collection_after_upload(datasource, upload_id)
                 else:
-                    logger.warning("⚠️ No row data found in Excel file")
+                    logger.warning(f"⚠️ Failed to save Excel data to MongoDB: {save_result.get('message')}")
                     # Update status to "failed" if upload_id is provided
                     if upload_id:
                         mongodb_service.update_upload_status(
                             upload_id=upload_id,
                             status="failed",
-                            error="No row data found in Excel file"
+                            error=save_result.get("message", "Failed to save data to MongoDB")
                         )
                     
             except MemoryError as mem_error:
@@ -387,28 +436,15 @@ class DataController:
                 file_paths.append(absolute_path)
                 logger.info(f"✅ File saved: {absolute_path} (size: {total_size} bytes)")
                 
-                # Save metadata to MongoDB
-                upload_id = mongodb_service.save_uploaded_file(
-                    filename=filename,
-                    datasource=datasource,
-                    file_path=absolute_path,
-                    file_size=total_size,
-                    uploaded_by="api_user"
-                )
-                if upload_id:
-                    upload_ids.append(upload_id)
-                    logger.info(f"📝 File metadata saved to MongoDB: upload_id={upload_id}")
-                
                 # Trigger background task to process file and save data to MongoDB
-                # Pass upload_id so we can update status
-                if upload_id:
-                    background_tasks.add_task(
-                        self._process_file_and_save_to_mongodb,
-                        absolute_path,
-                        filename,
-                        datasource,
-                        upload_id
-                    )
+                # We'll check if file is empty in the background task and skip upload_id creation if needed
+                background_tasks.add_task(
+                    self._process_file_and_save_to_mongodb,
+                    absolute_path,
+                    filename,
+                    datasource,
+                    None  # upload_id will be created only if file has data
+                )
             
             # Process in background (send notification)
             background_tasks.add_task(self._process_upload_background, datasource, file_paths)
@@ -540,15 +576,14 @@ class DataController:
                 logger.info(f"📝 File metadata saved to MongoDB: upload_id={mongo_upload_id}")
             
             # Trigger background task to process file and save data to MongoDB
-            # Pass upload_id so we can update status
-            if mongo_upload_id:
-                        background_tasks.add_task(
-                    self._process_file_and_save_to_mongodb,
-                    absolute_path,
-                    file_name,
-                    datasource,
-                    mongo_upload_id
-                )
+            # upload_id will be created in background task if file has data
+            background_tasks.add_task(
+                self._process_file_and_save_to_mongodb,
+                absolute_path,
+                file_name,
+                datasource,
+                None  # upload_id will be created only if file has data
+            )
             
             # Cleanup chunks
             try:

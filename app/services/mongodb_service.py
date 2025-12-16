@@ -545,12 +545,14 @@ class MongoDBService:
     def get_collection_keys(self, collection_name: str) -> List[str]:
         """
         Get unique keys from all documents in a collection
+        Also includes total_fields from raw_data_collection if available
         
         Args:
             collection_name: Name of the collection (will be converted to lowercase)
         
         Returns:
             List of unique keys (excluding _id, created_at, updated_at)
+            Includes total_fields from raw_data_collection if collection has no data
         
         Raises:
             ValueError: If collection doesn't exist
@@ -586,7 +588,23 @@ class MongoDBService:
             excluded_keys = {"_id", "created_at", "updated_at"}
             user_keys = sorted([key for key in all_keys if key not in excluded_keys])
             
-            logger.info(f"🔑 Found {len(user_keys)} unique keys in collection '{collection_name_lower}'")
+            # Also check raw_data_collection for total_fields (for empty files with only headers)
+            try:
+                raw_data_collection = self.db["raw_data_collection"]
+                raw_data_entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
+                if raw_data_entry and "total_fields" in raw_data_entry:
+                    total_fields = raw_data_entry.get("total_fields", [])
+                    # Add total_fields to the keys set
+                    for field in total_fields:
+                        if field not in excluded_keys:
+                            user_keys.append(field)
+                    # Remove duplicates and sort
+                    user_keys = sorted(list(set(user_keys)))
+                    logger.info(f"🔑 Found {len(total_fields)} header field(s) from raw_data_collection for '{collection_name_lower}'")
+            except Exception as e:
+                logger.debug(f"Could not retrieve total_fields from raw_data_collection: {e}")
+            
+            logger.info(f"🔑 Found {len(user_keys)} unique key(s) in collection '{collection_name_lower}'")
             
             return user_keys
             
