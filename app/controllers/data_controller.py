@@ -207,7 +207,9 @@ class DataController:
                             )
                     else:
                         # For smaller files, convert all at once
+                        # For empty DataFrames, to_dict('records') returns empty list
                         row_data = df.to_dict('records')
+                        logger.info(f"🔍 Debug: After to_dict('records'), row_data length: {len(row_data)}, total_rows: {total_rows}")
                         if len(row_data) != total_rows:
                             logger.warning(
                                 f"⚠️ Conversion mismatch: Expected {total_rows:,} rows, "
@@ -216,6 +218,7 @@ class DataController:
                     
                     # Return row_data, columns_count, and normalized column names
                     normalized_column_names = list(df.columns)
+                    logger.info(f"🔍 Debug: Returning - row_data length: {len(row_data)}, columns_count: {columns_count}, headers: {normalized_column_names[:3] if normalized_column_names else 'None'}...")
                     return row_data, columns_count, normalized_column_names
                 
                 # Run CPU-intensive operations in thread pool (non-blocking)
@@ -225,10 +228,12 @@ class DataController:
                 )
                 
                 logger.info(f"📊 Parsed file: {columns_count} columns, {len(row_data):,} rows ready for MongoDB")
+                logger.info(f"🔍 Debug: row_data is empty: {not row_data}, columns_count: {columns_count}")
                 
                 # Handle empty file (only headers, no data rows)
                 # Check if file has headers but no data rows
                 if not row_data and columns_count > 0:
+                    logger.info(f"✅ Detected empty file with headers - entering empty file handling block")
                     logger.info(f"📋 File contains only headers (no data rows). Storing {columns_count} header(s) in raw_data_collection.")
                     
                     # Get normalized column names (headers) - these are already normalized from _read_and_process_file
@@ -339,6 +344,66 @@ class DataController:
                 # For empty files, no upload_id means no record to update - this is expected
             except Exception as parse_error:
                 logger.error(f"❌ Error parsing Excel file: {str(parse_error)}", exc_info=True)
+                
+                # Try to read just headers if full parse failed (might be blank file)
+                try:
+                    logger.info(f"🔄 Attempting to read headers only after parse error...")
+                    loop = asyncio.get_event_loop()
+                    
+                    def _read_headers_only():
+                        """Try to read just the headers from the file"""
+                        try:
+                            if filename.lower().endswith('.csv'):
+                                # Read only first row (header)
+                                df = pd.read_csv(file_path, header=0, nrows=0, keep_default_na=False)
+                            else:
+                                # Read only header row for Excel
+                                df = pd.read_excel(file_path, engine='openpyxl', header=0, nrows=0, keep_default_na=False)
+                            
+                            if len(df.columns) > 0:
+                                df = normalize_dataframe_columns(df, inplace=False)
+                                return list(df.columns), len(df.columns)
+                            return [], 0
+                        except Exception as e:
+                            logger.error(f"❌ Error reading headers only: {e}")
+                            return [], 0
+                    
+                    # Try to get headers even if full parse failed
+                    headers_only, headers_count = await loop.run_in_executor(
+                        self.executor,
+                        _read_headers_only
+                    )
+                    
+                    if headers_count > 0:
+                        logger.info(f"📋 Found {headers_count} header(s) despite parse error. Storing in raw_data_collection.")
+                        normalized_headers = [h for h in headers_only if h and h.strip()]
+                        
+                        if normalized_headers:
+                            try:
+                                raw_data_collection = mongodb_service.db["raw_data_collection"]
+                                collection_name_lower = datasource.lower()
+                                
+                                raw_data_collection.update_one(
+                                    {"collection_name": collection_name_lower},
+                                    {
+                                        "$set": {
+                                            "total_fields": normalized_headers,
+                                            "updated_at": datetime.utcnow()
+                                        },
+                                        "$setOnInsert": {
+                                            "collection_name": collection_name_lower,
+                                            "created_at": datetime.utcnow()
+                                        }
+                                    },
+                                    upsert=True
+                                )
+                                logger.info(f"✅ Stored {len(normalized_headers)} header(s) in raw_data_collection for '{collection_name_lower}': {normalized_headers[:5]}...")
+                                return  # Exit early - headers stored, no need to continue
+                            except Exception as e:
+                                logger.error(f"❌ Error storing headers in raw_data_collection: {e}", exc_info=True)
+                except Exception as header_error:
+                    logger.error(f"❌ Error reading headers only: {header_error}", exc_info=True)
+                
                 # Only update status if upload_id exists (file had data, not empty)
                 if upload_id:
                     mongodb_service.update_upload_status(
