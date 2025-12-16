@@ -2,10 +2,10 @@ pipeline {
     agent any
     
     parameters {
-        string(
+        choice(
             name: 'BRANCH',
-            defaultValue: 'main',
-            description: 'Enter branch name to deploy (default: main)'
+            choices: ['main', 'vikas_dev', 'siddharth-dev', 'feature/excel-row-wise-storage', 'formula-processing'],
+            description: 'Select branch to deploy'
         )
     }
     
@@ -25,7 +25,7 @@ pipeline {
                     echo "📦 Checking out code from branch: ${GIT_BRANCH}..."
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: "${GIT_BRANCH}"]],
+                        branches: [[name: "*/${GIT_BRANCH}"]],
                         userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']],
                         extensions: [[$class: 'CleanCheckout']]
                     ])
