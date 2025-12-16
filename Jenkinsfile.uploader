@@ -27,10 +27,7 @@ pipeline {
                         $class: 'GitSCM',
                         branches: [[name: "*/${GIT_BRANCH}"]],
                         userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']],
-                        extensions: [
-                            [$class: 'CleanCheckout'],
-                            [$class: 'DisableChangelog']  // Disable changelog to avoid git whatchanged error
-                        ],
+                        extensions: [[$class: 'CleanCheckout']],
                         doGenerateSubmoduleConfigurations: false
                     ])
                 }
