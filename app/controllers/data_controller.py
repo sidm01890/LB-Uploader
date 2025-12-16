@@ -142,10 +142,17 @@ class DataController:
                     """Synchronous function to read and process file"""
                     # Determine file type and read accordingly
                     if filename.lower().endswith('.csv'):
-                        df = pd.read_csv(file_path)
+                        # For CSV, use header=0 to read first row as header
+                        df = pd.read_csv(file_path, header=0, keep_default_na=False)
                     else:
-                        # Excel file - read first sheet by default
-                        df = pd.read_excel(file_path, engine='openpyxl')
+                        # Excel file - read first sheet by default, header=0 means first row is header
+                        # keep_default_na=False prevents pandas from treating empty cells as NaN
+                        df = pd.read_excel(file_path, engine='openpyxl', header=0, keep_default_na=False)
+                    
+                    # Check if DataFrame is completely empty (no columns)
+                    if df.empty and len(df.columns) == 0:
+                        logger.warning(f"⚠️ File appears to be completely empty (no headers or data)")
+                        return [], 0, []
                     
                     # Normalize column headers (clean special characters, spaces, etc.)
                     df = normalize_dataframe_columns(df, inplace=False)
@@ -155,9 +162,9 @@ class DataController:
                     # Replace NaN/NaT with None for MongoDB compatibility
                     df = df.replace({pd.NA: None, pd.NaT: None})
                     
-                    # Get total row count
+                    # Get total row count (excluding header row)
                     total_rows = len(df)
-                    logger.info(f"📊 File contains {total_rows:,} rows")
+                    logger.info(f"📊 File contains {total_rows:,} data rows (excluding header)")
                     
                     # For very large files, convert to dict in chunks to manage memory
                     if total_rows > 100000:
@@ -220,37 +227,47 @@ class DataController:
                 logger.info(f"📊 Parsed file: {columns_count} columns, {len(row_data):,} rows ready for MongoDB")
                 
                 # Handle empty file (only headers, no data rows)
-                if not row_data:
-                    logger.info(f"📋 File contains only headers (no data rows). Storing headers in raw_data_collection.")
+                # Check if file has headers but no data rows
+                if not row_data and columns_count > 0:
+                    logger.info(f"📋 File contains only headers (no data rows). Storing {columns_count} header(s) in raw_data_collection.")
                     
                     # Get normalized column names (headers) - these are already normalized from _read_and_process_file
                     normalized_headers = normalized_column_names
                     
-                    # Store headers in raw_data_collection as total_fields
-                    try:
-                        raw_data_collection = mongodb_service.db["raw_data_collection"]
-                        collection_name_lower = datasource.lower()
-                        
-                        # Update or create document in raw_data_collection
-                        raw_data_collection.update_one(
-                            {"collection_name": collection_name_lower},
-                            {
-                                "$set": {
-                                    "total_fields": normalized_headers,
-                                    "updated_at": datetime.utcnow()
+                    # Filter out any empty header names
+                    normalized_headers = [h for h in normalized_headers if h and h.strip()]
+                    
+                    if normalized_headers:
+                        # Store headers in raw_data_collection as total_fields
+                        try:
+                            raw_data_collection = mongodb_service.db["raw_data_collection"]
+                            collection_name_lower = datasource.lower()
+                            
+                            # Update or create document in raw_data_collection
+                            raw_data_collection.update_one(
+                                {"collection_name": collection_name_lower},
+                                {
+                                    "$set": {
+                                        "total_fields": normalized_headers,
+                                        "updated_at": datetime.utcnow()
+                                    },
+                                    "$setOnInsert": {
+                                        "collection_name": collection_name_lower,
+                                        "created_at": datetime.utcnow()
+                                    }
                                 },
-                                "$setOnInsert": {
-                                    "collection_name": collection_name_lower,
-                                    "created_at": datetime.utcnow()
-                                }
-                            },
-                            upsert=True
-                        )
-                        logger.info(f"✅ Stored {len(normalized_headers)} header(s) in raw_data_collection for '{collection_name_lower}'")
-                    except Exception as e:
-                        logger.error(f"❌ Error storing headers in raw_data_collection: {e}", exc_info=True)
+                                upsert=True
+                            )
+                            logger.info(f"✅ Stored {len(normalized_headers)} header(s) in raw_data_collection for '{collection_name_lower}': {normalized_headers[:5]}...")
+                        except Exception as e:
+                            logger.error(f"❌ Error storing headers in raw_data_collection: {e}", exc_info=True)
+                    else:
+                        logger.warning(f"⚠️ No valid headers found in file (all headers are empty)")
                     
                     # Don't process further - file is empty, no data to save, no upload_id needed
+                    return
+                elif not row_data and columns_count == 0:
+                    logger.warning(f"⚠️ File appears to be completely empty (no headers or data). Skipping.")
                     return
                 
                 # File has data - create upload_id if not provided
@@ -312,25 +329,29 @@ class DataController:
                     
             except MemoryError as mem_error:
                 logger.error(f"❌ Memory error parsing large file: {str(mem_error)}")
-                # Update status to "failed" if upload_id is provided
+                # Only update status if upload_id exists (file had data, not empty)
                 if upload_id:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
                         status="failed",
                         error=f"Memory error: {str(mem_error)}"
                     )
+                # For empty files, no upload_id means no record to update - this is expected
             except Exception as parse_error:
                 logger.error(f"❌ Error parsing Excel file: {str(parse_error)}", exc_info=True)
-                # Update status to "failed" if upload_id is provided
+                # Only update status if upload_id exists (file had data, not empty)
                 if upload_id:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
                         status="failed",
                         error=f"Error parsing file: {str(parse_error)}"
                     )
+                # For empty files, no upload_id means no record to update - this is expected
                 
         except Exception as e:
             logger.error(f"❌ Error in background file processing for '{filename}': {e}", exc_info=True)
+            # Don't create upload records for errors - only update if upload_id already exists
+            # This ensures empty files don't get failed records created
     
     async def _process_collection_after_upload(self, datasource: str, upload_id: str = None):
         """
@@ -561,22 +582,9 @@ class DataController:
             
             absolute_path = os.path.abspath(final_path)
             
-            # Get file size
-            file_size = os.path.getsize(absolute_path)
-            
-            # Save metadata to MongoDB
-            mongo_upload_id = mongodb_service.save_uploaded_file(
-                filename=file_name,
-                datasource=datasource,
-                file_path=absolute_path,
-                file_size=file_size,
-                uploaded_by="api_user"
-            )
-            if mongo_upload_id:
-                logger.info(f"📝 File metadata saved to MongoDB: upload_id={mongo_upload_id}")
-            
             # Trigger background task to process file and save data to MongoDB
-            # upload_id will be created in background task if file has data
+            # upload_id will be created in background task only if file has data
+            # Empty files (header-only) will not create upload records
             background_tasks.add_task(
                 self._process_file_and_save_to_mongodb,
                 absolute_path,
@@ -600,7 +608,7 @@ class DataController:
                 "message": f"{datasource} file reassembled and stored",
                 "data": {
                     "file_path": absolute_path,
-                    "upload_id": mongo_upload_id,
+                    "upload_id": None,  # Will be created in background task only if file has data
                     "mongodb_connected": mongodb_service.is_connected(),
                     "collection_name": datasource.lower(),
                     "processing_status": "queued",
