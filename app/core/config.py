@@ -77,21 +77,25 @@ class OpenAIConfig(BaseSettings):
 class MongoDBConfig(BaseSettings):
     """MongoDB configuration for storing uploaded sheets"""
     
-    host: str = Field("localhost", env=["MONGO_HOST", "mongo.host"])
-    port: int = Field(27017, env=["MONGO_PORT", "mongo.port"])
-    database: str = Field("devyani_mongo", env=["MONGO_DATABASE", "mongo.database"])
-    username: Optional[str] = Field(None, env=["MONGO_USERNAME", "mongo.username"])
-    password: Optional[str] = Field(None, env=["MONGO_PASSWORD", "mongo.password"])
-    auth_source: str = Field("admin", env=["MONGO_AUTH_SOURCE", "mongo.auth.source"])
+    # Pydantic V2: Use validation_alias to map field names to env var names
+    # This allows us to read MONGO_HOST, MONGO_PORT, etc.
+    host: str = Field(default="localhost", validation_alias="MONGO_HOST")
+    port: int = Field(default=27017, validation_alias="MONGO_PORT")
+    database: str = Field(default="devyani_mongo", validation_alias="MONGO_DATABASE")
+    username: Optional[str] = Field(default=None, validation_alias="MONGO_USERNAME")
+    password: Optional[str] = Field(default=None, validation_alias="MONGO_PASSWORD")
+    auth_source: str = Field(default="admin", validation_alias="MONGO_AUTH_SOURCE")
     
     # Connection pool settings
-    max_pool_size: int = Field(50, env=["MONGO_MAX_POOL_SIZE", "mongo.max.pool.size"])
-    min_pool_size: int = Field(10, env=["MONGO_MIN_POOL_SIZE", "mongo.min.pool.size"])
-    max_idle_time_ms: int = Field(45000, env=["MONGO_MAX_IDLE_TIME_MS", "mongo.max.idle.time.ms"])
-    server_selection_timeout_ms: int = Field(5000, env=["MONGO_SERVER_SELECTION_TIMEOUT_MS", "mongo.server.selection.timeout.ms"])
+    max_pool_size: int = Field(default=50, validation_alias="MONGO_MAX_POOL_SIZE")
+    min_pool_size: int = Field(default=10, validation_alias="MONGO_MIN_POOL_SIZE")
+    max_idle_time_ms: int = Field(default=45000, validation_alias="MONGO_MAX_IDLE_TIME_MS")
+    server_selection_timeout_ms: int = Field(default=5000, validation_alias="MONGO_SERVER_SELECTION_TIMEOUT_MS")
     
     model_config = SettingsConfigDict(
-        case_sensitive=False
+        case_sensitive=False,
+        # Pydantic V2: Populate from environment variables
+        populate_by_name=True,  # Allow both field name and alias
     )
     
     def get_connection_string(self) -> str:
