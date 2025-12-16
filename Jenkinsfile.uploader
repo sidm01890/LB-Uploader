@@ -50,17 +50,17 @@ pipeline {
                 script {
                     echo "🚀 Deploying ${SERVICE_NAME} to server..."
                     try {
-                        sshagent([SSH_KEY]) {
-                            sh """
-                                ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${SERVER_USER}@${SERVER_HOST} << 'DEPLOY_EOF'
-                                    set -e  # Exit on error
-                                    cd ${PROJECT_DIR}
-                                    
-                                    echo "📥 Pulling latest changes in Uploader directory..."
-                                    cd Uploader || { echo "❌ Uploader directory not found"; exit 1; }
-                                    git fetch origin || { echo "❌ Git fetch failed"; exit 1; }
-                                    git checkout ${GIT_BRANCH} || { echo "❌ Git checkout failed"; exit 1; }
-                                    git pull origin ${GIT_BRANCH} || { echo "❌ Git pull failed"; exit 1; }
+                    sshagent([SSH_KEY]) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${SERVER_USER}@${SERVER_HOST} << DEPLOY_EOF
+                                set -e  # Exit on error
+                                cd ${PROJECT_DIR}
+                                
+                                echo "📥 Pulling latest changes in Uploader directory..."
+                                cd Uploader || { echo "❌ Uploader directory not found"; exit 1; }
+                                git fetch origin || { echo "❌ Git fetch failed"; exit 1; }
+                                git checkout ${GIT_BRANCH} || { echo "❌ Git checkout failed"; exit 1; }
+                                git pull origin ${GIT_BRANCH} || { echo "❌ Git pull failed"; exit 1; }
                                     
                                     echo "🔄 Going back to project root..."
                                     cd ..
