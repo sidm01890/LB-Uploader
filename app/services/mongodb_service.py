@@ -377,12 +377,46 @@ class MongoDBService:
         collection_name_lower = collection_name.lower()
         processed_collection_name = f"{collection_name_lower}_processed"
         
-        # Check if collections already exist
+        # Check if entry already exists in raw_data_collection (created via API)
+        # If it exists, skip creation and return success
+        try:
+            raw_data_collection = self.db["raw_data_collection"]
+            existing_entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
+            if existing_entry:
+                logger.info(f"ℹ️ Collection '{collection_name_lower}' already exists in raw_data_collection. Skipping creation.")
+                return {
+                    "status": "success",
+                    "message": f"Collection '{collection_name_lower}' already exists. Skipped creation.",
+                    "collection_name": collection_name_lower,
+                    "processed_collection_name": processed_collection_name,
+                    "unique_ids": existing_entry.get("unique_ids", unique_ids if unique_ids else [])
+                }
+        except Exception as e:
+            # If raw_data_collection doesn't exist yet, that's fine - we'll create it
+            logger.debug(f"raw_data_collection check: {e}")
+        
+        # Check if collections already exist in MongoDB
+        # If they exist, skip creation and return success
         existing_collections = self.db.list_collection_names()
-        if collection_name_lower in existing_collections:
-            raise ValueError(f"Collection '{collection_name_lower}' already exists")
-        if processed_collection_name in existing_collections:
-            raise ValueError(f"Processed collection '{processed_collection_name}' already exists")
+        if collection_name_lower in existing_collections or processed_collection_name in existing_collections:
+            logger.info(f"ℹ️ Collection '{collection_name_lower}' or '{processed_collection_name}' already exists in MongoDB. Skipping creation.")
+            # Get unique_ids from raw_data_collection if available
+            existing_unique_ids = unique_ids if unique_ids else []
+            try:
+                raw_data_collection = self.db["raw_data_collection"]
+                existing_entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
+                if existing_entry:
+                    existing_unique_ids = existing_entry.get("unique_ids", existing_unique_ids)
+            except Exception:
+                pass
+            
+            return {
+                "status": "success",
+                "message": f"Collection '{collection_name_lower}' already exists. Skipped creation.",
+                "collection_name": collection_name_lower,
+                "processed_collection_name": processed_collection_name,
+                "unique_ids": existing_unique_ids
+            }
         
         # Create the main collection (MongoDB creates collections lazily, so we insert an empty doc and delete it)
         collection = self.db[collection_name_lower]
@@ -401,7 +435,7 @@ class MongoDBService:
         # Save entry to raw_data_collection
         try:
             raw_data_collection = self.db["raw_data_collection"]
-            # Check if entry already exists (shouldn't happen, but just in case)
+            # Entry shouldn't exist at this point (we checked earlier), but double-check
             existing_entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
             if not existing_entry:
                 entry_doc = {
@@ -414,7 +448,8 @@ class MongoDBService:
                 raw_data_collection.insert_one(entry_doc)
                 logger.info(f"📝 Added '{collection_name_lower}' to raw_data_collection with unique_ids: {unique_ids}")
             else:
-                logger.warning(f"⚠️ Entry for '{collection_name_lower}' already exists in raw_data_collection")
+                # This shouldn't happen since we checked earlier, but if it does, just log and continue
+                logger.info(f"ℹ️ Entry for '{collection_name_lower}' already exists in raw_data_collection. Skipping insert.")
         except Exception as e:
             logger.error(f"❌ Failed to save entry to raw_data_collection: {e}")
             # Don't fail the whole operation if raw_data_collection save fails

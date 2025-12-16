@@ -62,7 +62,8 @@ class DBSetupController:
             }
         
         except ValueError as e:
-            # Collection already exists
+            # This shouldn't happen now since we skip instead of raising ValueError
+            # But keep it for backward compatibility
             raise HTTPException(
                 status_code=409,
                 detail=str(e)

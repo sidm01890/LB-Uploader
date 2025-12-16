@@ -241,13 +241,13 @@ class DataController:
                     
                     # Filter out any empty header names
                     normalized_headers = [h for h in normalized_headers if h and h.strip()]
-                    
                     if normalized_headers:
                         # Store headers in raw_data_collection as total_fields
                         try:
                             raw_data_collection = mongodb_service.db["raw_data_collection"]
                             collection_name_lower = datasource.lower()
-                            
+                            logger.info(f"🔍 Debug: collection_name_lower: {collection_name_lower}")
+                            logger.info(f"🔍 Debug: normalized_headers: {normalized_headers}")
                             # Update or create document in raw_data_collection
                             raw_data_collection.update_one(
                                 {"collection_name": collection_name_lower},
