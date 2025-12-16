@@ -1,6 +1,10 @@
 pipeline {
     agent any
     
+    options {
+        skipDefaultCheckout(true)  // Skip automatic checkout to avoid changelog error
+    }
+    
     parameters {
         choice(
             name: 'BRANCH',
@@ -28,7 +32,8 @@ pipeline {
                         branches: [[name: "*/${GIT_BRANCH}"]],
                         userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']],
                         extensions: [[$class: 'CleanCheckout']],
-                        doGenerateSubmoduleConfigurations: false
+                        doGenerateSubmoduleConfigurations: false,
+                        browser: [$class: 'GithubWeb', repoUrl: 'https://github.com/sidm01890/LB-Uploader.git']
                     ])
                 }
             }
