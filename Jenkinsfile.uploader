@@ -75,7 +75,7 @@ pipeline {
                             
                             // Deploy on server
                             sh """
-                                ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${SSH_USER}@${SERVER_HOST} << 'DEPLOY_EOF'
+                                ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${SSH_USER}@${SERVER_HOST} bash -s << DEPLOY_EOF
                                     set -e  # Exit on error
                                     cd ${PROJECT_DIR}
                                     
@@ -93,8 +93,8 @@ pipeline {
                                     sleep 25
                                     
                                     echo "✅ Verifying deployment..."
-                                    docker ps | grep ${SERVICE_NAME} || { echo "❌ Container not running"; exit 1; }
-                                    docker logs ${SERVICE_NAME} | tail -10
+                                    docker compose -f docker-compose.staging.yml ps ${SERVICE_NAME} || { echo "❌ Container not running"; exit 1; }
+                                    docker compose -f docker-compose.staging.yml logs --tail=10 ${SERVICE_NAME}
                                 DEPLOY_EOF
                             """
                         }
@@ -113,15 +113,23 @@ pipeline {
                     echo "✅ Verifying deployment..."
                     withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         sh """
-                            ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} << 'VERIFY_EOF'
+                            ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} bash -s << VERIFY_EOF
+                                set -e
+                                cd ${PROJECT_DIR}
+                                
                                 # Check container status
-                                docker ps | grep ${SERVICE_NAME}
+                                echo "📊 Checking container status..."
+                                docker compose -f docker-compose.staging.yml ps ${SERVICE_NAME} || { echo "❌ Container not running"; exit 1; }
                                 
                                 # Test health endpoint
-                                docker exec ${SERVICE_NAME} curl -s http://localhost:8010/api/health || echo "Health check failed"
+                                echo "🏥 Testing health endpoint..."
+                                docker compose -f docker-compose.staging.yml exec -T ${SERVICE_NAME} curl -s http://localhost:8010/api/health || { echo "⚠️ Health check failed"; exit 1; }
                                 
                                 # Check MongoDB connection
-                                docker exec ${SERVICE_NAME} python3 -c "from app.core.config import config; print(f'MongoDB: {config.mongodb.host}')" || echo "Config check failed"
+                                echo "🔌 Checking MongoDB connection..."
+                                docker compose -f docker-compose.staging.yml exec -T ${SERVICE_NAME} python3 -c "from app.core.config import config; print(f'MongoDB: {config.mongodb.host}')" || { echo "⚠️ Config check failed"; exit 1; }
+                                
+                                echo "✅ All verification checks passed!"
                             VERIFY_EOF
                         """
                     }
