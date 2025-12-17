@@ -75,8 +75,8 @@ pipeline {
                             
                             // Deploy on server
                             sh """
-                                ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${SSH_USER}@${SERVER_HOST} bash -s << DEPLOY_EOF
-                                    set -e  # Exit on error
+                                ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${SSH_USER}@${SERVER_HOST} 'bash -s' << 'DEPLOY_EOF'
+                                    set -e
                                     cd ${PROJECT_DIR}
                                     
                                     echo "🛑 Stopping and removing container..."
@@ -113,7 +113,7 @@ pipeline {
                     echo "✅ Verifying deployment..."
                     withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
                         sh """
-                            ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} bash -s << VERIFY_EOF
+                            ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} 'bash -s' << 'VERIFY_EOF'
                                 set -e
                                 cd ${PROJECT_DIR}
                                 
