@@ -746,7 +746,14 @@ class DataController:
                 # Still continue processing - the upload_id will be used in background task
             
             # Use created_upload_id if available, otherwise fall back to provided upload_id
+            # Safety check: ensure we always have an upload_id
             final_upload_id = created_upload_id if created_upload_id else upload_id
+            if not final_upload_id:
+                logger.error(f"❌ CRITICAL: Both created_upload_id and upload_id are None! This should never happen.")
+                # Generate a new one as last resort
+                import uuid
+                final_upload_id = str(uuid.uuid4())
+                logger.warning(f"⚠️ Generated fallback upload_id: {final_upload_id}")
             
             # Trigger background task to process file and save data to MongoDB
             # upload_id is now provided upfront, background task will update status accordingly
