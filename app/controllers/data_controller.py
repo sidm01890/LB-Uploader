@@ -35,6 +35,9 @@ class DataController:
     
     def __init__(self):
         self.email_service = EmailService()
+        self.scheduled_jobs_controller = ScheduledJobsController()
+        # Thread pool executor for CPU-intensive operations to avoid blocking event loop
+        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="file_processor")
     
     def _get_upload_directory(self, datasource: str) -> str:
         """Get upload directory for a datasource"""
