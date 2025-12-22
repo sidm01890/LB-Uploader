@@ -708,54 +708,35 @@ class DataController:
             file_size = os.path.getsize(absolute_path)
             logger.info(f"📦 Finalized file: {file_name}, size: {file_size} bytes, upload_id: {upload_id}")
             
-            # Check if upload_id exists in database, if not create it
-            # For chunked uploads, upload_id is provided by client but may not exist in DB yet
-            existing_record = None
-            if mongodb_service.is_connected():
-                try:
-                    logger.info(f"🔍 Checking for existing upload_id in MongoDB: {upload_id}")
-                    existing_record = mongodb_service.db.uploaded_files.find_one({"upload_id": upload_id})
-                    if existing_record:
-                        logger.info(f"✅ Found existing upload record for upload_id: {upload_id}")
-                    else:
-                        logger.info(f"ℹ️ No existing upload record found for upload_id: {upload_id}, will create new one")
-                except Exception as e:
-                    logger.warning(f"⚠️ Error checking for existing upload_id: {e}", exc_info=True)
-            else:
-                logger.warning(f"⚠️ MongoDB not connected, will attempt to create record anyway")
+            # Create or update uploaded_files entry
+            # For chunked uploads, upload_id is provided by client
+            # save_uploaded_file will handle duplicate key errors by updating the existing record
+            logger.info(f"📝 Creating/updating upload record for upload_id: {upload_id}")
+            created_upload_id = mongodb_service.save_uploaded_file(
+                filename=file_name,
+                datasource=datasource,
+                file_path=absolute_path,
+                file_size=file_size,
+                uploaded_by="api_user",
+                upload_id=upload_id  # Use the provided upload_id from client
+            )
             
-            if not existing_record:
-                # Create uploaded_files entry if it doesn't exist, using the provided upload_id
-                logger.info(f"📝 Creating new upload record for upload_id: {upload_id}")
-                created_upload_id = mongodb_service.save_uploaded_file(
-                    filename=file_name,
-                    datasource=datasource,
-                    file_path=absolute_path,
-                    file_size=file_size,
-                    uploaded_by="api_user",
-                    upload_id=upload_id  # Use the provided upload_id from client
-                )
+            if created_upload_id:
+                logger.info(f"✅ Upload record created/updated successfully: upload_id={created_upload_id}")
                 
-                if created_upload_id:
-                    logger.info(f"✅ File metadata saved to MongoDB: upload_id={created_upload_id}")
-                else:
-                    logger.error(f"❌ Failed to save file metadata to MongoDB for {file_name}. MongoDB may not be connected.")
-            else:
-                # Update existing record with final file path and size
-                logger.info(f"🔄 Updating existing upload record for upload_id: {upload_id}")
+                # Update with reassembly metadata
                 try:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
                         status="stored",
                         metadata={
-                            "file_path": absolute_path,
-                            "file_size": file_size,
                             "reassembled_at": datetime.utcnow()
                         }
                     )
-                    logger.info(f"✅ Updated existing upload record: upload_id={upload_id}")
                 except Exception as e:
-                    logger.error(f"❌ Error updating existing upload record: {e}", exc_info=True)
+                    logger.warning(f"⚠️ Error updating reassembly metadata: {e}")
+            else:
+                logger.error(f"❌ Failed to create/update upload record for {file_name}. MongoDB may not be connected.")
             
             # Trigger background task to process file and save data to MongoDB
             # upload_id is now provided upfront, background task will update status accordingly

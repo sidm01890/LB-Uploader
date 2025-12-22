@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import uuid
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, BulkWriteError
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, BulkWriteError, DuplicateKeyError
 from app.core.config import config
 
 logger = logging.getLogger(__name__)
@@ -139,17 +139,46 @@ class MongoDBService:
                 "updated_at": datetime.utcnow()
             }
             
-            result = self.db.uploaded_files.insert_one(document)
-            
-            if result.inserted_id:
-                logger.info(f"✅ File metadata saved to MongoDB: upload_id={upload_id}")
-                return upload_id
-            else:
-                logger.warning("⚠️ Failed to save file metadata to MongoDB")
-                return None
+            try:
+                result = self.db.uploaded_files.insert_one(document)
+                
+                if result.inserted_id:
+                    logger.info(f"✅ File metadata saved to MongoDB: upload_id={upload_id}")
+                    return upload_id
+                else:
+                    logger.warning("⚠️ Failed to save file metadata to MongoDB")
+                    return None
+            except DuplicateKeyError:
+                # Record already exists, update it instead
+                logger.info(f"ℹ️ Upload record already exists for upload_id={upload_id}, updating instead")
+                update_result = self.db.uploaded_files.update_one(
+                    {"upload_id": upload_id},
+                    {
+                        "$set": {
+                            "filename": filename,
+                            "datasource": datasource.upper(),
+                            "file_path": file_path,
+                            "file_size": file_size,
+                            "file_type": filename.split('.')[-1].lower() if '.' in filename else 'unknown',
+                            "status": "stored",
+                            "updated_at": datetime.utcnow()
+                        },
+                        "$setOnInsert": {
+                            "uploaded_at": datetime.utcnow(),
+                            "uploaded_by": uploaded_by,
+                            "created_at": datetime.utcnow()
+                        }
+                    }
+                )
+                if update_result.modified_count > 0 or update_result.matched_count > 0:
+                    logger.info(f"✅ Updated existing upload record: upload_id={upload_id}")
+                    return upload_id
+                else:
+                    logger.warning(f"⚠️ Failed to update existing upload record: upload_id={upload_id}")
+                    return None
                 
         except Exception as e:
-            logger.error(f"❌ Error saving file metadata to MongoDB: {e}")
+            logger.error(f"❌ Error saving file metadata to MongoDB: {e}", exc_info=True)
             return None
 
     def update_upload_status(
