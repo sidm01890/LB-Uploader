@@ -114,16 +114,24 @@ class MongoDBService:
         Returns:
             upload_id if successful, None otherwise
         """
+        logger.info(f"💾 save_uploaded_file called: filename={filename}, upload_id={upload_id}, datasource={datasource}")
+        
         if not self.is_connected():
             logger.warning("⚠️ MongoDB not connected, skipping metadata save")
+            return None
+        
+        if self.db is None:
+            logger.error("❌ MongoDB database object is None")
             return None
         
         try:
             # Use provided upload_id or generate a new one
             if upload_id is None:
                 upload_id = str(uuid.uuid4())
+                logger.info(f"🔑 Generated new upload_id: {upload_id}")
             else:
                 upload_id = str(upload_id)  # Ensure it's a string
+                logger.info(f"🔑 Using provided upload_id: {upload_id}")
             
             document = {
                 "upload_id": upload_id,
@@ -139,18 +147,20 @@ class MongoDBService:
                 "updated_at": datetime.utcnow()
             }
             
+            logger.info(f"📄 Attempting to insert document into uploaded_files collection: upload_id={upload_id}")
+            
             try:
                 result = self.db.uploaded_files.insert_one(document)
                 
                 if result.inserted_id:
-                    logger.info(f"✅ File metadata saved to MongoDB: upload_id={upload_id}")
+                    logger.info(f"✅ File metadata saved to MongoDB: upload_id={upload_id}, inserted_id={result.inserted_id}")
                     return upload_id
                 else:
-                    logger.warning("⚠️ Failed to save file metadata to MongoDB")
+                    logger.warning("⚠️ Failed to save file metadata to MongoDB - no inserted_id returned")
                     return None
-            except DuplicateKeyError:
+            except DuplicateKeyError as dke:
                 # Record already exists, update it instead
-                logger.info(f"ℹ️ Upload record already exists for upload_id={upload_id}, updating instead")
+                logger.info(f"ℹ️ Upload record already exists for upload_id={upload_id}, updating instead. Error: {dke}")
                 update_result = self.db.uploaded_files.update_one(
                     {"upload_id": upload_id},
                     {
@@ -170,12 +180,16 @@ class MongoDBService:
                         }
                     }
                 )
+                logger.info(f"🔄 Update result - matched: {update_result.matched_count}, modified: {update_result.modified_count}")
                 if update_result.modified_count > 0 or update_result.matched_count > 0:
                     logger.info(f"✅ Updated existing upload record: upload_id={upload_id}")
                     return upload_id
                 else:
                     logger.warning(f"⚠️ Failed to update existing upload record: upload_id={upload_id}")
                     return None
+            except Exception as insert_error:
+                logger.error(f"❌ Error during insert/update operation: {insert_error}", exc_info=True)
+                raise  # Re-raise to be caught by outer exception handler
                 
         except Exception as e:
             logger.error(f"❌ Error saving file metadata to MongoDB: {e}", exc_info=True)

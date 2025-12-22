@@ -712,14 +712,20 @@ class DataController:
             # For chunked uploads, upload_id is provided by client
             # save_uploaded_file will handle duplicate key errors by updating the existing record
             logger.info(f"📝 Creating/updating upload record for upload_id: {upload_id}")
-            created_upload_id = mongodb_service.save_uploaded_file(
-                filename=file_name,
-                datasource=datasource,
-                file_path=absolute_path,
-                file_size=file_size,
-                uploaded_by="api_user",
-                upload_id=upload_id  # Use the provided upload_id from client
-            )
+            logger.info(f"🔍 MongoDB connection status: {mongodb_service.is_connected()}")
+            
+            created_upload_id = None
+            try:
+                created_upload_id = mongodb_service.save_uploaded_file(
+                    filename=file_name,
+                    datasource=datasource,
+                    file_path=absolute_path,
+                    file_size=file_size,
+                    uploaded_by="api_user",
+                    upload_id=upload_id  # Use the provided upload_id from client
+                )
+            except Exception as e:
+                logger.error(f"❌ Exception while saving upload record: {e}", exc_info=True)
             
             if created_upload_id:
                 logger.info(f"✅ Upload record created/updated successfully: upload_id={created_upload_id}")
@@ -734,9 +740,13 @@ class DataController:
                         }
                     )
                 except Exception as e:
-                    logger.warning(f"⚠️ Error updating reassembly metadata: {e}")
+                    logger.warning(f"⚠️ Error updating reassembly metadata: {e}", exc_info=True)
             else:
-                logger.error(f"❌ Failed to create/update upload record for {file_name}. MongoDB may not be connected.")
+                logger.error(f"❌ Failed to create/update upload record for {file_name}. MongoDB connected: {mongodb_service.is_connected()}")
+                # Still continue processing - the upload_id will be used in background task
+            
+            # Use created_upload_id if available, otherwise fall back to provided upload_id
+            final_upload_id = created_upload_id if created_upload_id else upload_id
             
             # Trigger background task to process file and save data to MongoDB
             # upload_id is now provided upfront, background task will update status accordingly
@@ -745,7 +755,7 @@ class DataController:
                 absolute_path,
                 file_name,
                 datasource,
-                upload_id  # upload_id is now provided upfront
+                final_upload_id  # Use the upload_id (created or provided)
             )
             
             # Cleanup chunks
@@ -763,7 +773,7 @@ class DataController:
                 "message": f"{datasource} file reassembled and stored",
                 "data": {
                     "file_path": absolute_path,
-                    "upload_id": upload_id,
+                    "upload_id": final_upload_id,  # Return the upload_id (created or provided)
                     "mongodb_connected": mongodb_service.is_connected(),
                     "collection_name": datasource.lower(),
                     "processing_status": "queued",
