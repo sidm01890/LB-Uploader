@@ -1,0 +1,239 @@
+================================================================================
+                    JENKINS SETUP GUIDE - STEP BY STEP
+================================================================================
+
+PREREQUISITES:
+- Jenkins server installed and running
+- SSH private key for server access (65.0.236.144)
+- GitHub repository access
+
+================================================================================
+STEP 1: INSTALL REQUIRED JENKINS PLUGINS
+================================================================================
+
+1. Go to Jenkins Dashboard → Manage Jenkins → Manage Plugins
+2. Click "Available" tab
+3. Search and install:
+   ✓ Pipeline
+   ✓ Git
+   ✓ SSH Pipeline Steps (or SSH Agent Plugin)
+   ✓ GitHub Integration
+4. Click "Install without restart" (or restart if required)
+5. Wait for installation to complete
+
+================================================================================
+STEP 2: ADD SSH CREDENTIALS
+================================================================================
+
+1. Go to Jenkins Dashboard → Manage Jenkins → Manage Credentials
+2. Click "System" → "Global credentials (unrestricted)"
+3. Click "Add Credentials" (left sidebar)
+4. Fill in:
+   - Kind: SSH Username with private key
+   - Scope: Global
+   - ID: ssh-key (MUST be exactly this - case sensitive)
+   - Description: SSH Key for Deployment Server
+   - Username: ubuntu
+   - Private Key: 
+     * Select "Enter directly"
+     * Paste your SSH private key content
+     * OR select "From the Jenkins master ~/.ssh"
+5. Click "OK"
+
+================================================================================
+STEP 3: CREATE PIPELINE JOB - UPLOADER
+================================================================================
+
+3.1 Create New Job:
+    - Go to Jenkins Dashboard → New Item
+    - Enter name: LB-Uploader (or any name)
+    - Select "Pipeline"
+    - Click "OK"
+
+3.2 Configure General Settings:
+    - Description: Deploy LB-Uploader service to staging server
+    - ✓ Check "This project is parameterized"
+    - Click "Add Parameter" → "Choice Parameter"
+      * Name: BRANCH
+      * Choices (one per line):
+        main
+        vikas_dev
+        siddharth-dev
+        feature/excel-row-wise-storage
+        formula-processing
+      * Description: Select branch to deploy
+
+3.3 Configure Pipeline:
+    - Scroll to "Pipeline" section
+    - Definition: Select "Pipeline script from SCM"
+    - SCM: Select "Git"
+    - Repository URL: https://github.com/sidm01890/LB-Uploader.git
+    - Credentials: Leave empty (public repo) or add if private
+    - Branches to build:
+      * Branch Specifier: */${BRANCH} (uses parameter)
+    - Script Path: Jenkinsfile.uploader
+    - Click "Save"
+
+================================================================================
+STEP 4: CREATE PIPELINE JOB - BACKEND
+================================================================================
+
+4.1 Create New Job:
+    - Go to Jenkins Dashboard → New Item
+    - Enter name: LB-Backend
+    - Select "Pipeline"
+    - Click "OK"
+
+4.2 Configure General Settings:
+    - Description: Deploy LB-Backend service to staging server
+    - ✓ Check "This project is parameterized"
+    - Click "Add Parameter" → "Choice Parameter"
+      * Name: BRANCH
+      * Choices (one per line):
+        main
+        vikas_dev
+        siddharth-dev
+        develop
+        staging
+      * Description: Select branch to deploy
+
+4.3 Configure Pipeline:
+    - Definition: Select "Pipeline script from SCM"
+    - SCM: Select "Git"
+    - Repository URL: https://github.com/sidm01890/LB-Backend.git
+    - Branches to build: */${BRANCH}
+    - Script Path: Jenkinsfile.backend
+    - Click "Save"
+
+================================================================================
+STEP 5: CREATE PIPELINE JOB - FRONTEND
+================================================================================
+
+5.1 Create New Job:
+    - Go to Jenkins Dashboard → New Item
+    - Enter name: LB-Frontend
+    - Select "Pipeline"
+    - Click "OK"
+
+5.2 Configure General Settings:
+    - Description: Deploy LB-Frontend service to staging server
+    - ✓ Check "This project is parameterized"
+    - Click "Add Parameter" → "Choice Parameter"
+      * Name: BRANCH
+      * Choices (one per line):
+        main
+        vikas_dev
+        siddharth-dev
+        develop
+        staging
+      * Description: Select branch to deploy
+
+5.3 Configure Pipeline:
+    - Definition: Select "Pipeline script from SCM"
+    - SCM: Select "Git"
+    - Repository URL: https://github.com/sidm01890/LB-Fronend.git
+    - Branches to build: */${BRANCH}
+    - Script Path: Jenkinsfile.frontend
+    - Click "Save"
+
+================================================================================
+STEP 6: RUN PIPELINE
+================================================================================
+
+1. Go to job dashboard (e.g., LB-Uploader)
+2. Click "Build with Parameters"
+3. Select BRANCH: vikas_dev (or your branch)
+4. Click "Build"
+5. Watch "Console Output" for progress
+
+================================================================================
+QUICK REFERENCE TABLE
+================================================================================
+
+Service      | Job Name      | Repository                    | Jenkinsfile
+-------------|---------------|-------------------------------|------------------
+Uploader     | LB-Uploader   | LB-Uploader.git              | Jenkinsfile.uploader
+Backend      | LB-Backend    | LB-Backend.git               | Jenkinsfile.backend
+Frontend     | LB-Frontend   | LB-Fronend.git               | Jenkinsfile.frontend
+
+================================================================================
+SERVER REQUIREMENTS (65.0.236.144)
+================================================================================
+
+Ensure on server:
+✓ Docker installed
+✓ Docker Compose installed
+✓ docker-compose.staging.yml exists at /home/ubuntu/LaughingBuddha/
+✓ Services defined: uploader, backend, frontend
+✓ SSH access for ubuntu user
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Issue: "No such container" error
+Solution: Ensure docker-compose.staging.yml exists on server at 
+         /home/ubuntu/LaughingBuddha/
+
+Issue: SSH connection failed
+Solution: 
+  - Verify SSH key in credentials matches server key
+  - Test SSH manually: ssh -i <key> ubuntu@65.0.236.144
+
+Issue: "Credentials not found"
+Solution: Ensure credential ID is exactly "ssh-key" (case-sensitive)
+
+Issue: Branch not found
+Solution: Verify branch exists in repository and is spelled correctly
+
+Issue: "git whatchanged" error
+Solution: This is a warning, can be ignored. Pipeline will continue.
+
+================================================================================
+SUCCESS INDICATORS
+================================================================================
+
+✓ Deployment Successful when you see:
+  - "✅ Deployment successful!" in console
+  - Container status: "Up" and "healthy"
+  - Health check returns: 200 OK
+  - No errors in console output
+
+================================================================================
+DEPLOYMENT FLOW SUMMARY
+================================================================================
+
+1. Checkout: Code is checked out from selected branch
+2. Verify Changes: Shows last 5 commits and git status
+3. Deploy to Server:
+   - Copy files via tar+ssh (excludes build artifacts)
+   - Stop and remove old container
+   - Rebuild Docker image
+   - Start new container
+   - Wait for startup (25 seconds)
+   - Verify container is running
+4. Verify Deployment:
+   - Check container status
+   - Test health endpoint
+   - Service-specific checks (MongoDB, Database, etc.)
+
+================================================================================
+NOTES
+================================================================================
+
+- Credential ID must be exactly "ssh-key" (case-sensitive)
+- Each job needs branch parameter configured
+- Script paths must match Jenkinsfile names in repositories
+- Server must have docker-compose.staging.yml with all services
+- Health check endpoints:
+  * Uploader: /api/health (port 8010)
+  * Backend: /health (port 8034)
+  * Frontend: HTTP status check (port 80)
+
+================================================================================
+END OF GUIDE
+================================================================================
+
+
+
+

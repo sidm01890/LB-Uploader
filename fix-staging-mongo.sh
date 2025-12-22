@@ -88,3 +88,6 @@ docker logs laughingbuddha-uploader --tail 20
 echo ""
 echo "✅ Done! MongoDB configuration should now be set to staging (${STAGING_MONGO_HOST})"
 
+
+
+
