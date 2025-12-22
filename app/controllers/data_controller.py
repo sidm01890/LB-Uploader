@@ -11,9 +11,13 @@ import shutil
 import glob
 from datetime import datetime
 import pandas as pd
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from app.services.email_service import EmailService
 from app.services.mongodb_service import mongodb_service
+from app.core.header_normalizer import normalize_dataframe_columns
+from app.controllers.scheduled_jobs_controller import ScheduledJobsController
 
 logger = logging.getLogger(__name__)
 
