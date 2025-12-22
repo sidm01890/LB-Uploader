@@ -97,7 +97,8 @@ class MongoDBService:
         datasource: str,
         file_path: str,
         file_size: int,
-        uploaded_by: str = "api_user"
+        uploaded_by: str = "api_user",
+        upload_id: Optional[str] = None
     ) -> Optional[str]:
         """
         Save uploaded file metadata to MongoDB
@@ -108,6 +109,7 @@ class MongoDBService:
             file_path: Path where file is stored on disk
             file_size: Size of file in bytes
             uploaded_by: Username who uploaded the file
+            upload_id: Optional upload_id to use (for chunked uploads). If not provided, a new UUID will be generated.
         
         Returns:
             upload_id if successful, None otherwise
@@ -117,7 +119,11 @@ class MongoDBService:
             return None
         
         try:
-            upload_id = str(uuid.uuid4())
+            # Use provided upload_id or generate a new one
+            if upload_id is None:
+                upload_id = str(uuid.uuid4())
+            else:
+                upload_id = str(upload_id)  # Ensure it's a string
             
             document = {
                 "upload_id": upload_id,
