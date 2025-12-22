@@ -1,0 +1,150 @@
+pipeline {
+    agent any
+    
+    options {
+        skipDefaultCheckout(true)  // Skip automatic checkout to avoid changelog error
+    }
+    
+    parameters {
+        choice(
+            name: 'BRANCH',
+            choices: ['main', 'vikas_dev', 'siddharth-dev', 'feature/excel-row-wise-storage', 'formula-processing'],
+            description: 'Select branch to deploy'
+        )
+    }
+    
+    environment {
+        SERVER_HOST = '65.0.236.144'
+        SERVER_USER = 'ubuntu'
+        PROJECT_DIR = '/home/ubuntu/LaughingBuddha'
+        SERVICE_NAME = 'uploader'
+        GIT_BRANCH = "${params.BRANCH}"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    echo "📦 Checking out code from branch: ${GIT_BRANCH}..."
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${GIT_BRANCH}"]],
+                        userRemoteConfigs: [[url: 'https://github.com/sidm01890/LB-Uploader.git']],
+                        extensions: [[$class: 'CleanCheckout']],
+                        doGenerateSubmoduleConfigurations: false,
+                        browser: [$class: 'GithubWeb', repoUrl: 'https://github.com/sidm01890/LB-Uploader.git']
+                    ])
+                }
+            }
+        }
+        
+        stage('Verify Changes') {
+            steps {
+                script {
+                    echo "🔍 Verifying changes from branch: ${GIT_BRANCH}..."
+                    sh '''
+                        git log --oneline -5
+                        git status
+                    '''
+                }
+            }
+        }
+        
+        stage('Deploy to Server') {
+            steps {
+                script {
+                    echo "🚀 Deploying ${SERVICE_NAME} to server..."
+                    try {
+                        withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                            // Copy files to server using tar+ssh (more reliable than rsync)
+                            sh """
+                                echo "📤 Copying files to server..."
+                                tar --exclude='.git' \
+                                    --exclude='__pycache__' \
+                                    --exclude='*.pyc' \
+                                    --exclude='.pytest_cache' \
+                                    --exclude='data' \
+                                    --exclude='logs' \
+                                    --exclude='reports' \
+                                    -czf - . | ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} "
+                                    mkdir -p ${PROJECT_DIR}/Uploader &&
+                                    cd ${PROJECT_DIR}/Uploader &&
+                                    tar -xzf -
+                                "
+                            """
+                            
+                            // Deploy on server
+                            sh """
+                                ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${SSH_USER}@${SERVER_HOST} bash -s <<DEPLOY_EOF
+set -e
+cd ${PROJECT_DIR}
+
+echo "🛑 Stopping and removing container..."
+docker compose -f docker-compose.staging.yml stop ${SERVICE_NAME} || echo "Container not running"
+docker compose -f docker-compose.staging.yml rm -f ${SERVICE_NAME} || echo "Container not found"
+
+echo "🔨 Rebuilding image..."
+docker compose -f docker-compose.staging.yml build ${SERVICE_NAME} || { echo "❌ Build failed"; exit 1; }
+
+echo "🚀 Starting container..."
+docker compose -f docker-compose.staging.yml up -d ${SERVICE_NAME} || { echo "❌ Start failed"; exit 1; }
+
+echo "⏳ Waiting for startup (25 seconds)..."
+sleep 25
+
+echo "✅ Verifying deployment..."
+docker compose -f docker-compose.staging.yml ps ${SERVICE_NAME} || { echo "❌ Container not running"; exit 1; }
+docker compose -f docker-compose.staging.yml logs --tail=10 ${SERVICE_NAME}
+DEPLOY_EOF
+                            """
+                        }
+                    } catch (Exception e) {
+                        echo "❌ Deployment failed: ${e.getMessage()}"
+                        currentBuild.result = 'FAILURE'
+                        throw e
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    echo "✅ Verifying deployment..."
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        sh """
+                            ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${SSH_USER}@${SERVER_HOST} bash -s <<VERIFY_EOF
+set -e
+cd ${PROJECT_DIR}
+
+# Check container status
+echo "📊 Checking container status..."
+docker compose -f docker-compose.staging.yml ps ${SERVICE_NAME} || { echo "❌ Container not running"; exit 1; }
+
+# Test health endpoint
+echo "🏥 Testing health endpoint..."
+docker compose -f docker-compose.staging.yml exec -T ${SERVICE_NAME} curl -s http://localhost:8010/api/health || { echo "⚠️ Health check failed"; exit 1; }
+
+# Check MongoDB connection
+echo "🔌 Checking MongoDB connection..."
+docker compose -f docker-compose.staging.yml exec -T ${SERVICE_NAME} python3 -c "from app.core.config import config; print(f'MongoDB: {config.mongodb.host}')" || { echo "⚠️ Config check failed"; exit 1; }
+
+echo "✅ All verification checks passed!"
+VERIFY_EOF
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Deployment successful!"
+        }
+        failure {
+            echo "❌ Deployment failed!"
+        }
+    }
+}
+

@@ -103,6 +103,12 @@ class PropertiesLoader:
             'mysql.user': 'MYSQL_USER',
             'mysql.password': 'MYSQL_PASSWORD',
             'mysql.database': 'MYSQL_DB',
+            'mongo.host': 'MONGO_HOST',
+            'mongo.port': 'MONGO_PORT',
+            'mongo.database': 'MONGO_DATABASE',
+            'mongo.username': 'MONGO_USERNAME',
+            'mongo.password': 'MONGO_PASSWORD',
+            'mongo.auth.source': 'MONGO_AUTH_SOURCE',
             'openai.api.key': 'OPENAI_API_KEY',
             'openai.model': 'OPENAI_MODEL',
             'openai.request.timeout': 'OPENAI_REQUEST_TIMEOUT',
@@ -132,7 +138,9 @@ class PropertiesLoader:
             # Also set mapped environment variable names (for Pydantic Settings)
             if key in property_to_env_map:
                 env_key = property_to_env_map[key]
-                if env_key not in os.environ:  # Don't override existing env vars
+                # Only set env var if not already set (don't override docker-compose env vars)
+                # This allows docker-compose env vars to take precedence over properties
+                if env_key not in os.environ:
                     os.environ[env_key] = value
         
         return self.properties

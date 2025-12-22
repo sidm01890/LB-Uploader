@@ -29,34 +29,8 @@ def _is_prod():
     return _get_current_env().is_production
 
 
-class DatabaseConfig(BaseSettings):
-    """Database configuration with validation"""
-    
-    host: str = Field(..., validation_alias="MYSQL_HOST")
-    port: int = Field(3306, validation_alias="MYSQL_PORT")
-    user: str = Field(..., validation_alias="MYSQL_USER")
-    password: str = Field(..., validation_alias="MYSQL_PASSWORD")
-    database: str = Field(..., validation_alias="MYSQL_DB")
-    
-    @field_validator('password')
-    @classmethod
-    def password_not_hardcoded(cls, v):
-        """Ensure password is not hardcoded"""
-        # Allow default passwords in dev environment
-        if os.getenv('ALLOW_DEFAULT_PASSWORD') == 'true' or os.getenv('APP_ENV') == 'dev':
-            return v
-        if v and (v == '123!' or len(v) < 8):
-            raise ValueError(
-                "Weak password detected! "
-                "Use environment variable MYSQL_PASSWORD with a strong password."
-            )
-        return v
-    
-    model_config = SettingsConfigDict(
-        # Properties files are loaded via properties_loader
-        # Environment variables take precedence
-        case_sensitive=False
-    )
+# DatabaseConfig removed - using MongoDB now
+# MongoDB connection will be configured separately
 
 
 class EmailConfig(BaseSettings):
@@ -103,21 +77,25 @@ class OpenAIConfig(BaseSettings):
 class MongoDBConfig(BaseSettings):
     """MongoDB configuration for storing uploaded sheets"""
     
-    host: str = Field("localhost", env=["MONGO_HOST", "mongo.host"])
-    port: int = Field(27017, env=["MONGO_PORT", "mongo.port"])
-    database: str = Field("devyani_mongo", env=["MONGO_DATABASE", "mongo.database"])
-    username: Optional[str] = Field(None, env=["MONGO_USERNAME", "mongo.username"])
-    password: Optional[str] = Field(None, env=["MONGO_PASSWORD", "mongo.password"])
-    auth_source: str = Field("admin", env=["MONGO_AUTH_SOURCE", "mongo.auth.source"])
+    # Pydantic V2: Use validation_alias to map field names to env var names
+    # This allows us to read MONGO_HOST, MONGO_PORT, etc.
+    host: str = Field(default="localhost", validation_alias="MONGO_HOST")
+    port: int = Field(default=27017, validation_alias="MONGO_PORT")
+    database: str = Field(default="devyani_mongo", validation_alias="MONGO_DATABASE")
+    username: Optional[str] = Field(default=None, validation_alias="MONGO_USERNAME")
+    password: Optional[str] = Field(default=None, validation_alias="MONGO_PASSWORD")
+    auth_source: str = Field(default="admin", validation_alias="MONGO_AUTH_SOURCE")
     
     # Connection pool settings
-    max_pool_size: int = Field(50, env=["MONGO_MAX_POOL_SIZE", "mongo.max.pool.size"])
-    min_pool_size: int = Field(10, env=["MONGO_MIN_POOL_SIZE", "mongo.min.pool.size"])
-    max_idle_time_ms: int = Field(45000, env=["MONGO_MAX_IDLE_TIME_MS", "mongo.max.idle.time.ms"])
-    server_selection_timeout_ms: int = Field(5000, env=["MONGO_SERVER_SELECTION_TIMEOUT_MS", "mongo.server.selection.timeout.ms"])
+    max_pool_size: int = Field(default=50, validation_alias="MONGO_MAX_POOL_SIZE")
+    min_pool_size: int = Field(default=10, validation_alias="MONGO_MIN_POOL_SIZE")
+    max_idle_time_ms: int = Field(default=45000, validation_alias="MONGO_MAX_IDLE_TIME_MS")
+    server_selection_timeout_ms: int = Field(default=5000, validation_alias="MONGO_SERVER_SELECTION_TIMEOUT_MS")
     
     model_config = SettingsConfigDict(
-        case_sensitive=False
+        case_sensitive=False,
+        # Pydantic V2: Populate from environment variables
+        populate_by_name=True,  # Allow both field name and alias
     )
     
     def get_connection_string(self) -> str:
@@ -143,7 +121,7 @@ class AppConfig(BaseSettings):
     environment: Environment = Field(default_factory=get_environment, env="APP_ENV")
     
     # Core services (lazy instantiation to ensure properties are loaded first)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    # database: DatabaseConfig removed - using MongoDB now
     email: EmailConfig = Field(default_factory=EmailConfig)
     openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
     mongodb: MongoDBConfig = Field(default_factory=MongoDBConfig)
@@ -216,11 +194,7 @@ class AppConfig(BaseSettings):
 config = AppConfig()
 
 # Backward compatibility - expose individual configs at module level
-MYSQL_HOST = config.database.host
-MYSQL_PORT = config.database.port
-MYSQL_USER = config.database.user
-MYSQL_PASSWORD = config.database.password
-MYSQL_DB = config.database.database
+# MySQL configs removed - using MongoDB now
 
 OPENAI_API_KEY = config.openai.api_key
 MODEL_NAME = config.openai.model
