@@ -706,18 +706,27 @@ class DataController:
             
             absolute_path = os.path.abspath(final_path)
             file_size = os.path.getsize(absolute_path)
+            logger.info(f"📦 Finalized file: {file_name}, size: {file_size} bytes, upload_id: {upload_id}")
             
             # Check if upload_id exists in database, if not create it
             # For chunked uploads, upload_id is provided by client but may not exist in DB yet
             existing_record = None
             if mongodb_service.is_connected():
                 try:
+                    logger.info(f"🔍 Checking for existing upload_id in MongoDB: {upload_id}")
                     existing_record = mongodb_service.db.uploaded_files.find_one({"upload_id": upload_id})
+                    if existing_record:
+                        logger.info(f"✅ Found existing upload record for upload_id: {upload_id}")
+                    else:
+                        logger.info(f"ℹ️ No existing upload record found for upload_id: {upload_id}, will create new one")
                 except Exception as e:
-                    logger.warning(f"⚠️ Error checking for existing upload_id: {e}")
+                    logger.warning(f"⚠️ Error checking for existing upload_id: {e}", exc_info=True)
+            else:
+                logger.warning(f"⚠️ MongoDB not connected, will attempt to create record anyway")
             
             if not existing_record:
                 # Create uploaded_files entry if it doesn't exist, using the provided upload_id
+                logger.info(f"📝 Creating new upload record for upload_id: {upload_id}")
                 created_upload_id = mongodb_service.save_uploaded_file(
                     filename=file_name,
                     datasource=datasource,
@@ -728,11 +737,12 @@ class DataController:
                 )
                 
                 if created_upload_id:
-                    logger.info(f"📝 File metadata saved to MongoDB: upload_id={created_upload_id}")
+                    logger.info(f"✅ File metadata saved to MongoDB: upload_id={created_upload_id}")
                 else:
-                    logger.warning(f"⚠️ Failed to save file metadata to MongoDB for {file_name}")
+                    logger.error(f"❌ Failed to save file metadata to MongoDB for {file_name}. MongoDB may not be connected.")
             else:
                 # Update existing record with final file path and size
+                logger.info(f"🔄 Updating existing upload record for upload_id: {upload_id}")
                 try:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
@@ -745,7 +755,7 @@ class DataController:
                     )
                     logger.info(f"✅ Updated existing upload record: upload_id={upload_id}")
                 except Exception as e:
-                    logger.warning(f"⚠️ Error updating existing upload record: {e}")
+                    logger.error(f"❌ Error updating existing upload record: {e}", exc_info=True)
             
             # Trigger background task to process file and save data to MongoDB
             # upload_id is now provided upfront, background task will update status accordingly
