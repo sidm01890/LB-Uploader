@@ -78,6 +78,7 @@ class MongoDBConfig(BaseSettings):
     """MongoDB configuration for storing uploaded sheets"""
     
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     # Pydantic V2: Use validation_alias to map field names to env var names
     # This allows us to read MONGO_HOST, MONGO_PORT, etc.
     host: str = Field(default="localhost", validation_alias="MONGO_HOST")
@@ -87,6 +88,8 @@ class MongoDBConfig(BaseSettings):
     password: Optional[str] = Field(default=None, validation_alias="MONGO_PASSWORD")
     auth_source: str = Field(default="admin", validation_alias="MONGO_AUTH_SOURCE")
 =======
+=======
+>>>>>>> Stashed changes
     # Prioritize MONGO_HOST environment variable over properties file
     host: str = Field(default="localhost", validation_alias="MONGO_HOST", env="MONGO_HOST")
     port: int = Field(default=27017, validation_alias="MONGO_PORT", env="MONGO_PORT")
