@@ -91,6 +91,22 @@ class MongoDBService:
         except Exception:
             return False
     
+    def reconnect(self):
+        """Reconnect to MongoDB (useful when config changes)"""
+        # Close existing connection if any
+        if self.client is not None:
+            try:
+                self.client.close()
+            except Exception:
+                pass
+        
+        # Reset client and db
+        self.client = None
+        self.db = None
+        
+        # Reconnect with current config
+        self._connect()
+    
     def save_uploaded_file(
         self,
         filename: str,

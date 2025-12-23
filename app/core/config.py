@@ -77,6 +77,8 @@ class OpenAIConfig(BaseSettings):
 class MongoDBConfig(BaseSettings):
     """MongoDB configuration for storing uploaded sheets"""
     
+<<<<<<< Updated upstream
+<<<<<<< Updated upstream
     # Pydantic V2: Use validation_alias to map field names to env var names
     # This allows us to read MONGO_HOST, MONGO_PORT, etc.
     host: str = Field(default="localhost", validation_alias="MONGO_HOST")
@@ -85,6 +87,17 @@ class MongoDBConfig(BaseSettings):
     username: Optional[str] = Field(default=None, validation_alias="MONGO_USERNAME")
     password: Optional[str] = Field(default=None, validation_alias="MONGO_PASSWORD")
     auth_source: str = Field(default="admin", validation_alias="MONGO_AUTH_SOURCE")
+=======
+=======
+>>>>>>> Stashed changes
+    # Prioritize MONGO_HOST environment variable over properties file
+    host: str = Field(default="localhost", validation_alias="MONGO_HOST", env="MONGO_HOST")
+    port: int = Field(default=27017, validation_alias="MONGO_PORT", env="MONGO_PORT")
+    database: str = Field(default="devyani_mongo", validation_alias="MONGO_DATABASE", env="MONGO_DATABASE")
+    username: Optional[str] = Field(None, env=["MONGO_USERNAME", "mongo.username"])
+    password: Optional[str] = Field(None, env=["MONGO_PASSWORD", "mongo.password"])
+    auth_source: str = Field("admin", env=["MONGO_AUTH_SOURCE", "mongo.auth.source"])
+>>>>>>> Stashed changes
     
     # Connection pool settings
     max_pool_size: int = Field(default=50, validation_alias="MONGO_MAX_POOL_SIZE")
