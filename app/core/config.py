@@ -174,6 +174,15 @@ class AppConfig(BaseSettings):
         default_factory=lambda: "*" if _is_dev() else "",
         env=["CORS_ALLOWED_ORIGINS", "cors.allowed.origins"]
     )
+    # Formula scheduler
+    formula_job_interval_minutes: int = Field(
+        120,
+        env=["FORMULA_JOB_INTERVAL_MINUTES", "formula.job.interval.minutes"]
+    )
+    formula_job_start_delay_seconds: int = Field(
+        60,
+        env=["FORMULA_JOB_START_DELAY_SECONDS", "formula.job.start.delay.seconds"]
+    )
     
     # Database connection pooling (environment-specific)
     db_pool_size: int = Field(

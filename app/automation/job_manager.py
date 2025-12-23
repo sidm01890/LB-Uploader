@@ -21,8 +21,8 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from app.automation.sftp_service import SFTPAutomationService, SFTPConfig
 from app.automation.email_service import EmailProcessingService, EmailConfig
 from app.automation.notification_service import NotificationService, NotificationLevel, NotificationType
-from app.automation.orchestrator import AutomationOrchestrator, AutomationConfig
-from app.automation.config_factory import AutomationConfigFactory
+from app.controllers.scheduled_jobs_controller import ScheduledJobsController
+from app.core.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class JobType(str, Enum):
     DAILY_REPORT = "daily_report"
     FILE_CLEANUP = "file_cleanup"
     HEALTH_CHECK = "health_check"
+    FORMULA_CALCULATION = "formula_calculation"
 
 class JobFrequency(str, Enum):
     ONCE = "once"
@@ -176,6 +177,9 @@ class ScheduledJobManager:
     def _create_trigger(self, frequency: JobFrequency, schedule_params: Dict[str, Any]):
         """Create scheduler trigger based on frequency"""
         
+        start_in_seconds = schedule_params.get("start_in_seconds")
+        start_date = datetime.now() + timedelta(seconds=start_in_seconds) if start_in_seconds else None
+        
         if frequency == JobFrequency.ONCE:
             # Run once at specified time
             run_date = schedule_params.get("run_date")
@@ -187,11 +191,11 @@ class ScheduledJobManager:
         
         elif frequency == JobFrequency.MINUTELY:
             minutes = schedule_params.get("minutes", 1)
-            return IntervalTrigger(minutes=minutes)
+            return IntervalTrigger(minutes=minutes, start_date=start_date)
         
         elif frequency == JobFrequency.HOURLY:
             hours = schedule_params.get("hours", 1)
-            return IntervalTrigger(hours=hours)
+            return IntervalTrigger(hours=hours, start_date=start_date)
         
         elif frequency == JobFrequency.DAILY:
             hour = schedule_params.get("hour", 2)
@@ -273,6 +277,9 @@ class ScheduledJobManager:
                 
                 elif job_config.job_type == JobType.HEALTH_CHECK:
                     result = await self._execute_health_check_job(job_config.job_config)
+                
+                elif job_config.job_type == JobType.FORMULA_CALCULATION:
+                    result = await self._execute_formula_job(job_config.job_config)
                 
                 else:
                     raise ValueError(f"Unsupported job type: {job_config.job_type}")
@@ -378,6 +385,10 @@ class ScheduledJobManager:
         """Execute full workflow job"""
         
         try:
+            # Lazy import to avoid hard dependency during initialization
+            from app.automation.orchestrator import AutomationOrchestrator, AutomationConfig
+            from app.automation.config_factory import AutomationConfigFactory
+            
             # Create automation configuration
             if job_config.get("environment") == "production":
                 config = AutomationConfigFactory.create_production_config()
@@ -560,6 +571,32 @@ class ScheduledJobManager:
                 "error": str(e)
             }
     
+    async def _execute_formula_job(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute formula calculation job"""
+        
+        try:
+            controller_key = "formula_controller"
+            if controller_key not in self.service_cache:
+                self.service_cache[controller_key] = ScheduledJobsController()
+            
+            controller: ScheduledJobsController = self.service_cache[controller_key]
+            result = await controller.process_formula_calculations()
+            
+            data = result.get("data", {})
+            return {
+                "success": True,
+                "job_type": "formula_calculation",
+                "reports_processed": data.get("reports_processed", 0),
+                "total_documents_processed": data.get("total_documents_processed", 0),
+            }
+        
+        except Exception as e:
+            return {
+                "success": False,
+                "job_type": "formula_calculation",
+                "error": str(e)
+            }
+    
     async def _send_job_notification(self, job_config: ScheduledJobConfig, execution_record: Dict[str, Any]):
         """Send notification for job completion"""
         
@@ -651,6 +688,23 @@ class ScheduledJobManager:
         """Add default system maintenance jobs"""
         
         try:
+            # Formula calculation job
+            formula_job = ScheduledJobConfig(
+                job_id="formula_calculation",
+                job_name="Formula Calculation Job",
+                job_type=JobType.FORMULA_CALCULATION,
+                frequency=JobFrequency.MINUTELY,
+                schedule_params={
+                    "minutes": config.formula_job_interval_minutes,
+                    "start_in_seconds": config.formula_job_start_delay_seconds,
+                },
+                job_config={},
+                notification_on_success=False,
+                notification_on_failure=True
+            )
+            
+            await self.add_scheduled_job(formula_job)
+            
             # Daily cleanup job
             cleanup_job = ScheduledJobConfig(
                 job_id="system_cleanup_daily",

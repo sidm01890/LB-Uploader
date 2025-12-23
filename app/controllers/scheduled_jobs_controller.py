@@ -25,7 +25,7 @@ class ScheduledJobsController:
         # These can be adjusted via environment variables if needed
         # Reduced batch size for formula calculations to handle large datasets (800K+ records)
         self.batch_size = int(os.getenv("SCHEDULED_JOB_BATCH_SIZE", "5000"))  # Default for regular processing
-        self.formula_batch_size = int(os.getenv("FORMULA_JOB_BATCH_SIZE", "1000"))  # Smaller batch for formula calculations
+        self.formula_batch_size = int(os.getenv("FORMULA_JOB_BATCH_SIZE", "10000"))  # Smaller batch for formula calculations
         self.batch_delay_seconds = float(os.getenv("SCHEDULED_JOB_BATCH_DELAY", "0.01"))  # Delay between batches
     
     def _sanitize_date(self, value: Any) -> Optional[datetime]:

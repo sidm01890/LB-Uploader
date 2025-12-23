@@ -10,7 +10,7 @@ from app.logging_config import setup_logging, request_logger
 from app.core.config import config
 from app.core.environment import get_environment
 # Scheduler imports
-from app.automation.job_manager import startup_job_manager, shutdown_job_manager
+from app.automation.job_manager import startup_job_manager, shutdown_job_manager, job_manager
 
 # Setup logging with environment-aware level
 setup_logging(config.log_level)
@@ -26,6 +26,10 @@ async def lifespan(app: FastAPI):
 
     # Start automation scheduler
     await startup_job_manager()
+    logging.info(
+        f"Job manager started: scheduler_running={job_manager.scheduler.running}, "
+        f"jobs={len(job_manager.get_scheduled_jobs())}"
+    )
 
     try:
         yield
