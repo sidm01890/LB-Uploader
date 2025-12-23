@@ -1094,6 +1094,181 @@ class ScheduledJobsController:
             logger.warning(f"⚠️ Error evaluating condition: {e}")
             return False
     
+    def _evaluate_reasons(
+        self,
+        reasons: List[Dict[str, Any]],
+        calculated_fields: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Evaluate reasons based on delta column values and thresholds.
+        
+        Args:
+            reasons: List of reason dictionaries with reason, delta_column, threshold, must_check
+            calculated_fields: Dictionary of calculated fields including delta columns
+        
+        Returns:
+            Dictionary with 'reason' (comma-separated string) and 'reconciliation_status'
+        """
+        matched_reasons = []
+        
+        if not reasons:
+            return {
+                "reason": "",
+                "reconciliation_status": "RECONCILED"
+            }
+        
+        for reason_config in reasons:
+            try:
+                reason_name = reason_config.get('reason', '')
+                delta_column_name = reason_config.get('delta_column', '')
+                threshold = reason_config.get('threshold', 0)
+                must_check = reason_config.get('must_check', False)
+                
+                if not reason_name or not delta_column_name:
+                    continue
+                
+                # Skip if must_check is false and we already have reasons
+                if not must_check and matched_reasons:
+                    continue
+                
+                # Get delta column value (case-insensitive lookup)
+                delta_value = None
+                delta_column_lower = delta_column_name.lower()
+                
+                # Try to find delta column value in calculated_fields
+                for key, val in calculated_fields.items():
+                    if key.lower() == delta_column_lower:
+                        try:
+                            delta_value = float(val) if val is not None else 0
+                        except (ValueError, TypeError):
+                            delta_value = 0
+                        break
+                
+                # If delta column not found, default to 0
+                if delta_value is None:
+                    delta_value = 0
+                
+                # Check if absolute value exceeds threshold
+                if abs(delta_value) > abs(threshold):
+                    matched_reasons.append(reason_name)
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Error evaluating reason '{reason_config.get('reason', 'unknown')}': {e}")
+                continue
+        
+        # Build result
+        if matched_reasons:
+            return {
+                "reason": ", ".join(matched_reasons),
+                "reconciliation_status": "UNRECONCILED"
+            }
+        else:
+            return {
+                "reason": "",
+                "reconciliation_status": "RECONCILED"
+            }
+    
+    def _evaluate_delta_column(
+        self,
+        delta_column: Dict[str, Any],
+        calculated_fields: Dict[str, Any]
+    ) -> Any:
+        """
+        Evaluate a delta column expression using calculated field values.
+        
+        Args:
+            delta_column: Dictionary with delta_column_name, first_formula, second_formula, value
+            calculated_fields: Dictionary of already calculated fields
+        
+        Returns:
+            Calculated delta value or 0 if evaluation fails
+        """
+        try:
+            delta_column_name = delta_column.get('delta_column_name', '')
+            first_formula = delta_column.get('first_formula', '')
+            second_formula = delta_column.get('second_formula', '')
+            value_expression = delta_column.get('value', '')
+            
+            if not delta_column_name or not value_expression:
+                logger.warning(f"⚠️ Delta column missing required fields: {delta_column}")
+                return 0
+            
+            # Start with the value expression
+            evaluated_expression = value_expression
+            
+            # Replace all calculated field references in the expression (case-insensitive)
+            # First, build a map of all calculated fields (uppercase keys for matching)
+            calc_field_map = {}
+            for key, val in calculated_fields.items():
+                # Skip metadata fields
+                if key in ['processed_at', 'updated_at'] or key.endswith('_mapping_key'):
+                    continue
+                # Store both uppercase and lowercase versions for matching
+                calc_field_map[key.upper()] = val
+                calc_field_map[key.lower()] = val
+            
+            # Replace all calculated field references in the expression
+            # Match uppercase identifiers (like NET_AMOUNT, CALCULATED_NET_AMOUNT, etc.)
+            uppercase_pattern = r'\b([A-Z][A-Z0-9_]{2,})\b'
+            matches = re.findall(uppercase_pattern, evaluated_expression)
+            
+            for match in matches:
+                if match in calc_field_map:
+                    try:
+                        value = calc_field_map[match]
+                        value_float = float(value) if value is not None else 0
+                        # Replace all occurrences of this field reference
+                        pattern = r'\b' + re.escape(match) + r'\b'
+                        evaluated_expression = re.sub(pattern, str(value_float), evaluated_expression)
+                    except (ValueError, TypeError):
+                        # If conversion fails, use 0
+                        pattern = r'\b' + re.escape(match) + r'\b'
+                        evaluated_expression = re.sub(pattern, '0', evaluated_expression)
+                else:
+                    # Field not found in calculated_fields, use 0 as default
+                    pattern = r'\b' + re.escape(match) + r'\b'
+                    evaluated_expression = re.sub(pattern, '0', evaluated_expression)
+            
+            # Also try lowercase matching for any remaining references
+            lowercase_pattern = r'\b([a-z][a-z0-9_]{2,})\b'
+            lowercase_matches = re.findall(lowercase_pattern, evaluated_expression)
+            
+            for match in lowercase_matches:
+                if match in calc_field_map:
+                    try:
+                        value = calc_field_map[match]
+                        value_float = float(value) if value is not None else 0
+                        pattern = r'\b' + re.escape(match) + r'\b'
+                        evaluated_expression = re.sub(pattern, str(value_float), evaluated_expression)
+                    except (ValueError, TypeError):
+                        pattern = r'\b' + re.escape(match) + r'\b'
+                        evaluated_expression = re.sub(pattern, '0', evaluated_expression)
+                else:
+                    pattern = r'\b' + re.escape(match) + r'\b'
+                    evaluated_expression = re.sub(pattern, '0', evaluated_expression)
+            
+            # Validate expression contains only safe characters
+            safe_pattern = r'^[0-9+\-*/().\s]+$'
+            if not re.match(safe_pattern, evaluated_expression):
+                logger.warning(
+                    f"⚠️ Delta column '{delta_column_name}' expression contains invalid characters after evaluation: {evaluated_expression}. "
+                    f"Original expression: {value_expression}"
+                )
+                return 0
+            
+            # Evaluate the expression
+            result = eval(evaluated_expression)
+            
+            # Convert to float
+            if isinstance(result, (int, float)):
+                return float(result)
+            else:
+                return 0
+                
+        except Exception as e:
+            logger.error(f"❌ Error evaluating delta column '{delta_column.get('delta_column_name', 'unknown')}': {e}")
+            return 0
+    
     def _evaluate_formula(
         self,
         formula_text: str,
@@ -1318,6 +1493,8 @@ class ScheduledJobsController:
                 formulas = formula_doc.get('formulas', [])
                 mapping_keys = formula_doc.get('mapping_keys', {}) or {}
                 conditions = formula_doc.get('conditions', {}) or {}
+                delta_columns = formula_doc.get('delta_columns', []) or []
+                reasons = formula_doc.get('reasons', []) or []
                 
                 if not report_name_from_doc or not formulas:
                     logger.warning(f"⚠️ Skipping formula document with missing report_name or formulas: {formula_doc.get('_id')}")
@@ -1329,7 +1506,9 @@ class ScheduledJobsController:
                         report_name_from_doc,
                         formulas,
                         mapping_keys,
-                        conditions
+                        conditions,
+                        delta_columns,
+                        reasons
                     )
                     results.append(result)
                     total_documents_processed += result.get('documents_processed', 0)
@@ -1367,7 +1546,9 @@ class ScheduledJobsController:
         report_name: str,
         formulas: List[Dict[str, Any]],
         mapping_keys: Dict[str, List[str]],
-        conditions: Dict[str, List[Dict[str, Any]]]
+        conditions: Dict[str, List[Dict[str, Any]]],
+        delta_columns: List[Dict[str, Any]] = None,
+        reasons: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Process formulas for a single report with multi-collection mapping/upsert logic.
@@ -1377,9 +1558,17 @@ class ScheduledJobsController:
             formulas: List of formula dictionaries
             mapping_keys: Dict of collection -> list of fields for mapping keys
             conditions: Dict of collection -> list of filter conditions
+            delta_columns: List of delta column dictionaries to calculate after formulas
+            reasons: List of reason dictionaries to check after delta columns
         """
         if not mongodb_service.is_connected() or mongodb_service.db is None:
             raise ConnectionError("MongoDB is not connected")
+        
+        if delta_columns is None:
+            delta_columns = []
+        
+        if reasons is None:
+            reasons = []
         
         try:
             target_collection = mongodb_service.db[report_name]
@@ -1655,6 +1844,24 @@ class ScheduledJobsController:
                 f"{total_processed} calculated, {total_errors} errors"
             )
             
+            # After all collections are processed, calculate delta columns and reasons
+            # This ensures all fields from all collections are available
+            if delta_columns or reasons:
+                logger.info(
+                    f"📊 Calculating delta columns and reasons for report '{report_name}' "
+                    f"after all collections are processed"
+                )
+                delta_reason_count = await self._calculate_delta_columns_and_reasons(
+                    target_collection,
+                    primary_mapping_key_field,
+                    delta_columns,
+                    reasons
+                )
+                logger.info(
+                    f"✅ Calculated delta columns and reasons for {delta_reason_count} record(s) "
+                    f"in report '{report_name}'"
+                )
+            
             return {
                 "report_name": report_name,
                 "source_collection": primary_collection_name,
@@ -1668,6 +1875,141 @@ class ScheduledJobsController:
             logger.error(f"❌ Error processing report formulas '{report_name}': {e}")
             raise
 
+    async def _calculate_delta_columns_and_reasons(
+        self,
+        target_collection,
+        primary_mapping_key_field: str,
+        delta_columns: List[Dict[str, Any]],
+        reasons: List[Dict[str, Any]]
+    ) -> int:
+        """
+        Calculate delta columns and reasons for all records in target collection.
+        This is called AFTER all collections are processed and merged.
+        
+        Args:
+            target_collection: Target MongoDB collection
+            primary_mapping_key_field: Primary mapping key field name
+            delta_columns: List of delta column dictionaries
+            reasons: List of reason dictionaries
+        
+        Returns:
+            Number of records processed
+        """
+        from pymongo import UpdateOne
+        
+        if not delta_columns and not reasons:
+            return 0
+        
+        batch_size = self.formula_batch_size
+        processed_count = 0
+        
+        # Get all records from target collection
+        total_records = target_collection.count_documents({})
+        if total_records == 0:
+            logger.info("📊 No records found in target collection for delta/reason calculation")
+            return 0
+        
+        logger.info(f"📊 Processing {total_records:,} record(s) for delta columns and reasons")
+        
+        cursor = target_collection.find({}).batch_size(batch_size)
+        batch_operations = []
+        batch_number = 0
+        
+        try:
+            for record in cursor:
+                try:
+                    # Get all fields from the record (excluding MongoDB _id)
+                    calculated_fields = {k: v for k, v in record.items() if not k.startswith("_")}
+                    
+                    # Calculate delta columns
+                    if delta_columns:
+                        for delta_column in delta_columns:
+                            try:
+                                delta_column_name = delta_column.get('delta_column_name', '')
+                                if not delta_column_name:
+                                    continue
+                                
+                                delta_value = self._evaluate_delta_column(delta_column, calculated_fields)
+                                calculated_fields[delta_column_name.lower()] = delta_value
+                                
+                            except Exception as e:
+                                logger.warning(f"⚠️ Error calculating delta column '{delta_column.get('delta_column_name', 'unknown')}': {e}")
+                                delta_column_name = delta_column.get('delta_column_name', '')
+                                if delta_column_name:
+                                    calculated_fields[delta_column_name.lower()] = 0
+                    
+                    # Evaluate reasons
+                    if reasons:
+                        try:
+                            reason_result = self._evaluate_reasons(reasons, calculated_fields)
+                            calculated_fields['reason'] = reason_result.get('reason', '')
+                            calculated_fields['reconciliation_status'] = reason_result.get('reconciliation_status', 'RECONCILED')
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error evaluating reasons: {e}")
+                            calculated_fields['reason'] = ''
+                            calculated_fields['reconciliation_status'] = 'RECONCILED'
+                    else:
+                        # No reasons configured, default to RECONCILED
+                        calculated_fields['reason'] = ''
+                        calculated_fields['reconciliation_status'] = 'RECONCILED'
+                    
+                    # Update processed_at timestamp
+                    calculated_fields['processed_at'] = datetime.utcnow()
+                    
+                    # Build filter query using primary mapping key
+                    mapping_key_value = record.get(primary_mapping_key_field)
+                    if mapping_key_value:
+                        filter_query = {primary_mapping_key_field: mapping_key_value}
+                    else:
+                        # Fallback to _id if mapping key not found
+                        filter_query = {"_id": record.get("_id")}
+                    
+                    batch_operations.append(
+                        UpdateOne(
+                            filter_query,
+                            {"$set": calculated_fields}
+                        )
+                    )
+                    processed_count += 1
+                    
+                    # Execute batch when it reaches batch_size
+                    if len(batch_operations) >= batch_size:
+                        batch_number += 1
+                        try:
+                            target_collection.bulk_write(batch_operations, ordered=False)
+                            logger.info(
+                                f"📊 Processed batch {batch_number} for delta/reasons: "
+                                f"{len(batch_operations)} record(s)"
+                            )
+                        except Exception as e:
+                            logger.error(f"❌ Error executing batch operations for delta/reasons batch {batch_number}: {e}")
+                        
+                        batch_operations = []
+                        await asyncio.sleep(self.batch_delay_seconds)
+                
+                except Exception as e:
+                    logger.warning(f"⚠️ Error processing record for delta/reasons: {e}")
+                    continue
+            
+            # Process remaining records in final batch
+            if batch_operations:
+                batch_number += 1
+                try:
+                    target_collection.bulk_write(batch_operations, ordered=False)
+                    logger.info(
+                        f"📊 Processed final batch {batch_number} for delta/reasons: "
+                        f"{len(batch_operations)} record(s)"
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Error executing final batch operations for delta/reasons: {e}")
+        
+        finally:
+            if cursor:
+                cursor.close()
+            gc.collect()
+        
+        return processed_count
+    
     async def _process_formula_batch(
         self,
         batch_docs: List[tuple],
@@ -1767,6 +2109,9 @@ class ScheduledJobsController:
                         calculated_value = 0
                     
                     calculated_fields[calculated_field_name] = calculated_value
+                
+                # Note: Delta columns and reasons are calculated AFTER all collections are processed
+                # This ensures all fields from all collections are available for delta/reason calculations
                 
                 calculated_fields[current_mapping_key_field] = mapping_key_value
                 calculated_fields['processed_at'] = datetime.utcnow()
