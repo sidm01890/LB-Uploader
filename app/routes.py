@@ -11,6 +11,7 @@ import logging
 
 # Import controllers
 from app.controllers.data_controller import DataController
+from app.controllers.db_setup_controller import DBSetupController
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ router = APIRouter()  # Main API router with /api prefix
 
 # Initialize controllers
 data_controller = DataController()
+db_setup_controller = DBSetupController()
 
 
 # ============================================================================
@@ -118,6 +120,203 @@ async def finalize_chunked_upload(
     **Note:** This endpoint must be called after all chunks are uploaded.
     """
     return await data_controller.finalize_chunked_upload(upload_id, file_name, datasource, background_tasks)
+
+
+# ============================================================================
+# DATABASE SETUP ROUTES
+# ============================================================================
+
+class CreateCollectionRequest(BaseModel):
+    """Request model for creating a MongoDB collection"""
+    collection_name: str = Field(
+        ...,
+        description="Name of the collection to create (will be converted to lowercase)",
+        example="Zomato",
+        min_length=1
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "collection_name": "Zomato"
+            }
+        }
+
+
+class CreateCollectionResponse(BaseModel):
+    """Response model for collection creation"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Collection 'zomato' created successfully")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collection_name": "zomato",
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.post(
+    "/uploader/setup/new",
+    tags=["Database Setup"],
+    summary="Create new MongoDB collection",
+    description="Create a new MongoDB collection in the database. The collection name will be automatically converted to lowercase. Returns an error if the collection already exists.",
+    response_model=CreateCollectionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Collection created successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Collection 'zomato' created successfully",
+                        "data": {
+                            "collection_name": "zomato",
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        409: {
+            "description": "Collection already exists",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Collection 'zomato' already exists"
+                    }
+                }
+            }
+        },
+        503: {
+            "description": "MongoDB connection error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "MongoDB connection error: MongoDB is not connected"
+                    }
+                }
+            }
+        }
+    }
+)
+async def create_collection(request: CreateCollectionRequest = Body(...)):
+    """
+    Create a new MongoDB collection.
+    
+    **Features:**
+    - Collection name is automatically converted to lowercase (e.g., "Zomato" → "zomato")
+    - Returns error if collection already exists
+    - Validates MongoDB connection before creating collection
+    
+    **Request Body:**
+    ```json
+    {
+        "collection_name": "Zomato"
+    }
+    ```
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Collection 'zomato' created successfully",
+        "data": {
+            "collection_name": "zomato",
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Error Responses:**
+    - **409 Conflict**: Collection already exists
+    - **503 Service Unavailable**: MongoDB not connected
+    - **500 Internal Server Error**: Other errors
+    """
+    return await db_setup_controller.create_collection(request.collection_name)
+
+
+class ListCollectionsResponse(BaseModel):
+    """Response model for listing collections"""
+    status: int = Field(..., description="HTTP status code", example=200)
+    message: str = Field(..., description="Response message", example="Found 2 collection(s)")
+    data: Dict[str, Any] = Field(
+        ...,
+        description="Response data",
+        example={
+            "collections": ["swiggy", "zomato"],
+            "count": 2,
+            "mongodb_connected": True
+        }
+    )
+
+
+@router.get(
+    "/uploader/setup/collections",
+    tags=["Database Setup"],
+    summary="List all MongoDB collections",
+    description="Get a list of all collection names in the MongoDB database. Returns an empty array if no collections exist or if MongoDB is not connected.",
+    response_model=ListCollectionsResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "List of collections retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "status": 200,
+                        "message": "Found 2 collection(s)",
+                        "data": {
+                            "collections": ["swiggy", "zomato"],
+                            "count": 2,
+                            "mongodb_connected": True
+                        }
+                    }
+                }
+            }
+        },
+        500: {
+            "description": "Internal server error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Failed to list collections: <error message>"
+                    }
+                }
+            }
+        }
+    }
+)
+async def list_all_collections():
+    """
+    Get all MongoDB collection names.
+    
+    **Features:**
+    - Returns all collection names in the database
+    - Collections are returned in alphabetical order
+    - System collections (starting with "system.") are excluded
+    - Returns empty array if no collections exist or MongoDB is not connected
+    
+    **Success Response (200):**
+    ```json
+    {
+        "status": 200,
+        "message": "Found 2 collection(s)",
+        "data": {
+            "collections": ["swiggy", "zomato"],
+            "count": 2,
+            "mongodb_connected": true
+        }
+    }
+    ```
+    
+    **Note:** The actual response will reflect the current collections in your MongoDB database.
+    
+    **Note:** If MongoDB is not connected, the `collections` array will be empty and `mongodb_connected` will be `false`.
+    """
+    return await db_setup_controller.list_all_collections()
 
 
 # ============================================================================
