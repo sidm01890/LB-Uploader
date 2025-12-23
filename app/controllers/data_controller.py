@@ -269,14 +269,42 @@ class DataController:
                     else:
                         logger.warning(f"⚠️ No valid headers found in file (all headers are empty)")
                     
-                    # Don't process further - file is empty, no data to save, no upload_id needed
+                    # Update upload status to indicate file is empty (header-only)
+                    if upload_id:
+                        mongodb_service.update_upload_status(
+                            upload_id=upload_id,
+                            status="empty",
+                            metadata={
+                                "empty_file_type": "header_only",
+                                "headers_count": columns_count,
+                                "processed_at": datetime.utcnow()
+                            }
+                        )
+                        logger.info(f"✅ Updated upload status to 'empty' for upload_id={upload_id}")
+                    
+                    # Don't process further - file is empty, no data to save
                     return
                 elif not row_data and columns_count == 0:
                     logger.warning(f"⚠️ File appears to be completely empty (no headers or data). Skipping.")
+                    
+                    # Update upload status to indicate file is completely empty
+                    if upload_id:
+                        mongodb_service.update_upload_status(
+                            upload_id=upload_id,
+                            status="empty",
+                            metadata={
+                                "empty_file_type": "completely_empty",
+                                "processed_at": datetime.utcnow()
+                            }
+                        )
+                        logger.info(f"✅ Updated upload status to 'empty' for upload_id={upload_id}")
+                    
                     return
                 
-                # File has data - create upload_id if not provided
+                # File has data - upload_id should already be provided from upload_data method
+                # If upload_id is not provided (shouldn't happen in normal flow), log warning
                 if not upload_id:
+                    logger.warning(f"⚠️ upload_id not provided for file with data: {filename}. Creating entry now.")
                     upload_id = mongodb_service.save_uploaded_file(
                         filename=filename,
                         datasource=datasource,
@@ -334,14 +362,13 @@ class DataController:
                     
             except MemoryError as mem_error:
                 logger.error(f"❌ Memory error parsing large file: {str(mem_error)}")
-                # Only update status if upload_id exists (file had data, not empty)
+                # Update status to "failed" if upload_id exists
                 if upload_id:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
                         status="failed",
                         error=f"Memory error: {str(mem_error)}"
                     )
-                # For empty files, no upload_id means no record to update - this is expected
             except Exception as parse_error:
                 logger.error(f"❌ Error parsing Excel file: {str(parse_error)}", exc_info=True)
                 
@@ -398,20 +425,34 @@ class DataController:
                                     upsert=True
                                 )
                                 logger.info(f"✅ Stored {len(normalized_headers)} header(s) in raw_data_collection for '{collection_name_lower}': {normalized_headers[:5]}...")
+                                
+                                # Update upload status to indicate file is empty (header-only) with parse error
+                                if upload_id:
+                                    mongodb_service.update_upload_status(
+                                        upload_id=upload_id,
+                                        status="empty",
+                                        metadata={
+                                            "empty_file_type": "header_only_parse_error",
+                                            "headers_count": headers_count,
+                                            "parse_error": str(parse_error),
+                                            "processed_at": datetime.utcnow()
+                                        }
+                                    )
+                                    logger.info(f"✅ Updated upload status to 'empty' for upload_id={upload_id}")
+                                
                                 return  # Exit early - headers stored, no need to continue
                             except Exception as e:
                                 logger.error(f"❌ Error storing headers in raw_data_collection: {e}", exc_info=True)
                 except Exception as header_error:
                     logger.error(f"❌ Error reading headers only: {header_error}", exc_info=True)
                 
-                # Only update status if upload_id exists (file had data, not empty)
+                # Update status to "failed" if upload_id exists
                 if upload_id:
                     mongodb_service.update_upload_status(
                         upload_id=upload_id,
                         status="failed",
                         error=f"Error parsing file: {str(parse_error)}"
                     )
-                # For empty files, no upload_id means no record to update - this is expected
                 
         except Exception as e:
             logger.error(f"❌ Error in background file processing for '{filename}': {e}", exc_info=True)
@@ -522,19 +563,37 @@ class DataController:
                 file_paths.append(absolute_path)
                 logger.info(f"✅ File saved: {absolute_path} (size: {total_size} bytes)")
                 
+                # Create uploaded_files entry immediately
+                upload_id = mongodb_service.save_uploaded_file(
+                    filename=filename,
+                    datasource=datasource,
+                    file_path=absolute_path,
+                    file_size=total_size,
+                    uploaded_by="api_user"
+                )
+                
+                if upload_id:
+                    upload_ids.append(upload_id)
+                    logger.info(f"📝 File metadata saved to MongoDB: upload_id={upload_id}")
+                else:
+                    logger.warning(f"⚠️ Failed to save file metadata to MongoDB for {filename}")
+                    # Continue processing even if metadata save fails
+                
                 # Trigger background task to process file and save data to MongoDB
-                # We'll check if file is empty in the background task and skip upload_id creation if needed
+                # upload_id is now provided upfront, background task will update status accordingly
                 background_tasks.add_task(
                     self._process_file_and_save_to_mongodb,
                     absolute_path,
                     filename,
                     datasource,
-                    None  # upload_id will be created only if file has data
+                    upload_id  # upload_id is now created upfront
                 )
             
             # Process in background (send notification)
             background_tasks.add_task(self._process_upload_background, datasource, file_paths)
             
+            
+
             return {
                 "status": 200,
                 "message": f"{datasource} data file uploaded and stored",
@@ -646,16 +705,56 @@ class DataController:
                         shutil.copyfileobj(chunk_file, outfile)
             
             absolute_path = os.path.abspath(final_path)
+            file_size = os.path.getsize(absolute_path)
+            
+            # Check if upload_id exists in database, if not create it
+            # For chunked uploads, upload_id is provided by client but may not exist in DB yet
+            existing_record = None
+            if mongodb_service.is_connected():
+                try:
+                    existing_record = mongodb_service.db.uploaded_files.find_one({"upload_id": upload_id})
+                except Exception as e:
+                    logger.warning(f"⚠️ Error checking for existing upload_id: {e}")
+            
+            if not existing_record:
+                # Create uploaded_files entry if it doesn't exist, using the provided upload_id
+                created_upload_id = mongodb_service.save_uploaded_file(
+                    filename=file_name,
+                    datasource=datasource,
+                    file_path=absolute_path,
+                    file_size=file_size,
+                    uploaded_by="api_user",
+                    upload_id=upload_id  # Use the provided upload_id from client
+                )
+                
+                if created_upload_id:
+                    logger.info(f"📝 File metadata saved to MongoDB: upload_id={created_upload_id}")
+                else:
+                    logger.warning(f"⚠️ Failed to save file metadata to MongoDB for {file_name}")
+            else:
+                # Update existing record with final file path and size
+                try:
+                    mongodb_service.update_upload_status(
+                        upload_id=upload_id,
+                        status="stored",
+                        metadata={
+                            "file_path": absolute_path,
+                            "file_size": file_size,
+                            "reassembled_at": datetime.utcnow()
+                        }
+                    )
+                    logger.info(f"✅ Updated existing upload record: upload_id={upload_id}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error updating existing upload record: {e}")
             
             # Trigger background task to process file and save data to MongoDB
-            # upload_id will be created in background task only if file has data
-            # Empty files (header-only) will not create upload records
+            # upload_id is now provided upfront, background task will update status accordingly
             background_tasks.add_task(
                 self._process_file_and_save_to_mongodb,
                 absolute_path,
                 file_name,
                 datasource,
-                None  # upload_id will be created only if file has data
+                upload_id  # upload_id is now provided upfront
             )
             
             # Cleanup chunks
@@ -673,7 +772,7 @@ class DataController:
                 "message": f"{datasource} file reassembled and stored",
                 "data": {
                     "file_path": absolute_path,
-                    "upload_id": None,  # Will be created in background task only if file has data
+                    "upload_id": upload_id,
                     "mongodb_connected": mongodb_service.is_connected(),
                     "collection_name": datasource.lower(),
                     "processing_status": "queued",
