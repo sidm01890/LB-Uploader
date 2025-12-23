@@ -9,6 +9,8 @@ from app.routes import router
 from app.logging_config import setup_logging, request_logger
 from app.core.config import config
 from app.core.environment import get_environment
+# Scheduler imports
+from app.automation.job_manager import startup_job_manager, shutdown_job_manager
 
 # Setup logging with environment-aware level
 setup_logging(config.log_level)
@@ -21,15 +23,16 @@ async def lifespan(app: FastAPI):
     logging.info(f"Environment: {env.value.upper()}")
     if config.enable_docs:
         logging.info("API Documentation available at /docs")
-    
-    # Automation system removed - only file upload functionality is available
-    
-    yield
-    
-    # Shutdown
-    logging.info("File Upload Service API shutting down...")
-    
-    # Automation system removed - only file upload functionality is available
+
+    # Start automation scheduler
+    await startup_job_manager()
+
+    try:
+        yield
+    finally:
+        # Shutdown
+        logging.info("File Upload Service API shutting down...")
+        await shutdown_job_manager()
 
 # Determine docs URLs based on environment
 docs_url = "/docs" if config.enable_docs else None
