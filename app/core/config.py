@@ -6,7 +6,7 @@ Uses properties files (application.properties style) with profile support
 
 import os
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.environment import Environment, detect_environment, load_environment_config, get_environment
@@ -77,18 +77,49 @@ class OpenAIConfig(BaseSettings):
 class MongoDBConfig(BaseSettings):
     """MongoDB configuration for storing uploaded sheets"""
     
-    host: str = Field("localhost", env=["MONGO_HOST", "mongo.host"])
-    port: int = Field(27017, env=["MONGO_PORT", "mongo.port"])
-    database: str = Field("devyani_mongo", env=["MONGO_DATABASE", "mongo.database"])
-    username: Optional[str] = Field(None, env=["MONGO_USERNAME", "mongo.username"])
-    password: Optional[str] = Field(None, env=["MONGO_PASSWORD", "mongo.password"])
-    auth_source: str = Field("admin", env=["MONGO_AUTH_SOURCE", "mongo.auth.source"])
+    # Explicit validation aliases so pydantic-settings (v2) picks up env vars
+    host: str = Field(
+        "localhost",
+        validation_alias=AliasChoices("MONGO_HOST", "mongo.host"),
+    )
+    port: int = Field(
+        27017,
+        validation_alias=AliasChoices("MONGO_PORT", "mongo.port"),
+    )
+    database: str = Field(
+        "devyani_mongo",
+        validation_alias=AliasChoices("MONGO_DATABASE", "mongo.database"),
+    )
+    username: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("MONGO_USERNAME", "mongo.username"),
+    )
+    password: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("MONGO_PASSWORD", "mongo.password"),
+    )
+    auth_source: str = Field(
+        "admin",
+        validation_alias=AliasChoices("MONGO_AUTH_SOURCE", "mongo.auth.source"),
+    )
     
     # Connection pool settings
-    max_pool_size: int = Field(50, env=["MONGO_MAX_POOL_SIZE", "mongo.max.pool.size"])
-    min_pool_size: int = Field(10, env=["MONGO_MIN_POOL_SIZE", "mongo.min.pool.size"])
-    max_idle_time_ms: int = Field(45000, env=["MONGO_MAX_IDLE_TIME_MS", "mongo.max.idle.time.ms"])
-    server_selection_timeout_ms: int = Field(5000, env=["MONGO_SERVER_SELECTION_TIMEOUT_MS", "mongo.server.selection.timeout.ms"])
+    max_pool_size: int = Field(
+        50,
+        validation_alias=AliasChoices("MONGO_MAX_POOL_SIZE", "mongo.max.pool.size"),
+    )
+    min_pool_size: int = Field(
+        10,
+        validation_alias=AliasChoices("MONGO_MIN_POOL_SIZE", "mongo.min.pool.size"),
+    )
+    max_idle_time_ms: int = Field(
+        45000,
+        validation_alias=AliasChoices("MONGO_MAX_IDLE_TIME_MS", "mongo.max.idle.time.ms"),
+    )
+    server_selection_timeout_ms: int = Field(
+        5000,
+        validation_alias=AliasChoices("MONGO_SERVER_SELECTION_TIMEOUT_MS", "mongo.server.selection.timeout.ms"),
+    )
     
     model_config = SettingsConfigDict(
         case_sensitive=False
