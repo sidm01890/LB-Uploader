@@ -965,12 +965,30 @@ class ScheduledJobsController:
         
         return sorted_formulas
     
-    def _build_mapping_key(self, document: Dict[str, Any], key_fields: List[str]) -> Optional[str]:
+    def _build_mapping_key(self, document: Dict[str, Any], key_fields: List[str], doc_id: Optional[Any] = None) -> Optional[str]:
         """
         Build a composite mapping key from the given document using provided fields.
         Returns None if any field is missing or empty.
+        If key_fields is empty, returns a fallback key (unique_id or doc_id) if available.
+        
+        Args:
+            document: Document dictionary (may not have _id if it was already popped)
+            key_fields: List of field names to use for building the key
+            doc_id: Optional document _id (passed separately if document._id was already removed)
         """
         if not key_fields:
+            # Fallback: use unique_id if available, otherwise use doc_id parameter
+            # This allows processing documents even when mapping_keys is not specified
+            unique_id = document.get('unique_id')
+            if unique_id:
+                return str(unique_id)
+            
+            # Try document._id first, then fallback to doc_id parameter
+            doc_id_value = document.get('_id') or doc_id
+            if doc_id_value:
+                return str(doc_id_value)
+            
+            # Last resort: return None (should rarely happen)
             return None
         
         values = []
@@ -1519,13 +1537,28 @@ class ScheduledJobsController:
                 batch_docs: List[tuple] = []
                 batch_number = 0
                 estimated_batches = (document_count + batch_size - 1) // batch_size  # Ceiling division
+                skipped_count = 0  # Track skipped documents
                 
                 try:
                     for doc in cursor:
                         try:
+                            # Store _id before removing it (needed for fallback when mapping_keys is empty)
+                            doc_id = doc.get('_id')
                             doc.pop('_id', None)
-                            mapping_key_value = self._build_mapping_key(doc, mapping_key_fields)
+                            
+                            # Build mapping key (pass doc_id for fallback when mapping_key_fields is empty)
+                            mapping_key_value = self._build_mapping_key(doc, mapping_key_fields, doc_id=doc_id)
+                            
+                            # If still None after fallback, skip this document (should rarely happen)
                             if mapping_key_value is None:
+                                skipped_count += 1
+                                if skipped_count <= 5:  # Log first 5 skipped documents
+                                    logger.warning(
+                                        f"⚠️ Skipping document #{skipped_count}: No mapping key available. "
+                                        f"Document has unique_id={doc.get('unique_id')}, _id={doc_id}, "
+                                        f"mapping_key_fields={mapping_key_fields}, "
+                                        f"doc_keys={list(doc.keys())[:10]}"
+                                    )
                                 continue
                             
                             batch_docs.append((doc, mapping_key_value))
@@ -1609,6 +1642,13 @@ class ScheduledJobsController:
                     batch_docs = []
                     gc.collect()
                     logger.info(f"🧹 Memory cleanup completed for collection '{collection_name}'")
+                    
+                    # Log summary of skipped documents if any
+                    if skipped_count > 0:
+                        logger.warning(
+                            f"⚠️ Skipped {skipped_count} document(s) from '{collection_name}' "
+                            f"due to missing mapping keys. Check if documents have 'unique_id' or '_id' fields."
+                        )
             
             logger.info(
                 f"✅ Processed {total_processed} documents for report '{report_name}': "
