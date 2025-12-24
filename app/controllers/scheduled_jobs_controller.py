@@ -25,7 +25,7 @@ class ScheduledJobsController:
         # These can be adjusted via environment variables if needed
         # Reduced batch size for formula calculations to handle large datasets (800K+ records)
         self.batch_size = int(os.getenv("SCHEDULED_JOB_BATCH_SIZE", "5000"))  # Default for regular processing
-        self.formula_batch_size = int(os.getenv("FORMULA_JOB_BATCH_SIZE", "10000"))  # Smaller batch for formula calculations
+        self.formula_batch_size = int(os.getenv("FORMULA_JOB_BATCH_SIZE", "1000"))  # Smaller batch for formula calculations
         self.batch_delay_seconds = float(os.getenv("SCHEDULED_JOB_BATCH_DELAY", "0.01"))  # Delay between batches
     
     def _sanitize_date(self, value: Any) -> Optional[datetime]:
@@ -1686,6 +1686,37 @@ class ScheduledJobsController:
             
             # Store formula_outputs for use in error messages
             self._formula_outputs_cache = formula_outputs
+            
+            # Build mapping key field names for all collections that will be processed
+            # This is needed for index creation
+            all_mapping_key_fields = {
+                primary_base_name: primary_mapping_key_field
+            }
+            for collection_name in collections_to_process:
+                base_name = collection_name.replace("_processed", "")
+                if base_name not in all_mapping_key_fields:
+                    # Generate mapping key field name for this collection
+                    all_mapping_key_fields[base_name] = f"{base_name}_mapping_key"
+            
+            # Ensure indexes exist on target collection for optimal query performance
+            # This creates indexes on mapping key fields used in $in queries
+            try:
+                index_result = mongodb_service.ensure_formula_indexes(
+                    report_name=report_name,
+                    mapping_key_fields=all_mapping_key_fields
+                )
+                if index_result.get("success"):
+                    logger.info(
+                        f"📊 Index creation: {index_result.get('indexes_created', 0)} created, "
+                        f"{index_result.get('indexes_skipped', 0)} already existed"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Index creation had issues (processing will continue): "
+                        f"{', '.join(index_result.get('errors', []))}"
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to ensure indexes for report '{report_name}': {e}. Processing will continue.")
             
             # Use smaller batch size for formula calculations to handle large datasets
             batch_size = self.formula_batch_size

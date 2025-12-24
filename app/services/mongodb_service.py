@@ -81,6 +81,172 @@ class MongoDBService:
         except Exception as e:
             logger.warning(f"⚠️ Failed to create indexes: {e}")
     
+    def _create_collection_indexes(self, collection, index_specs: List[Dict[str, Any]]) -> int:
+        """
+        Create indexes on a collection with error handling.
+        
+        Args:
+            collection: MongoDB collection object
+            index_specs: List of index specifications, each containing:
+                - 'keys': Index keys (string or list of tuples)
+                - 'name': Optional index name (auto-generated if not provided)
+                - 'unique': Optional unique constraint (default: False)
+                - 'background': Optional background creation (default: True)
+        
+        Returns:
+            Number of indexes successfully created
+        """
+        if self.db is None or collection is None:
+            return 0
+        
+        created_count = 0
+        for spec in index_specs:
+            try:
+                keys = spec.get('keys')
+                if not keys:
+                    logger.warning(f"⚠️ Skipping index spec with no keys: {spec}")
+                    continue
+                
+                index_options = {
+                    'background': spec.get('background', True),  # Don't block operations
+                    'name': spec.get('name')
+                }
+                
+                if spec.get('unique', False):
+                    index_options['unique'] = True
+                
+                # Check if index already exists
+                try:
+                    existing_indexes = list(collection.list_indexes())
+                    index_name = index_options.get('name')
+                    if index_name:
+                        # Check by name
+                        if any(idx.get('name') == index_name for idx in existing_indexes):
+                            logger.debug(f"📋 Index '{index_name}' already exists on collection '{collection.name}'")
+                            continue
+                    else:
+                        # Check by keys (MongoDB auto-generates name)
+                        # For simple single-field indexes, check if field is already indexed
+                        if isinstance(keys, str):
+                            if any(idx.get('key', {}).get(keys) for idx in existing_indexes):
+                                logger.debug(f"📋 Index on '{keys}' already exists on collection '{collection.name}'")
+                                continue
+                except Exception as check_error:
+                    # If we can't check existing indexes, proceed with creation (MongoDB will handle duplicates)
+                    logger.debug(f"📋 Could not check existing indexes for collection '{collection.name}': {check_error}. Proceeding with creation.")
+                
+                # Create index
+                collection.create_index(keys, **index_options)
+                index_display_name = index_name or (keys if isinstance(keys, str) else str(keys))
+                logger.debug(f"✅ Created index '{index_display_name}' on collection '{collection.name}'")
+                created_count += 1
+                
+            except Exception as e:
+                index_display = spec.get('name') or str(spec.get('keys', 'unknown'))
+                logger.warning(f"⚠️ Failed to create index '{index_display}' on collection '{collection.name}': {e}")
+                # Continue with other indexes even if one fails
+        
+        return created_count
+    
+    def ensure_formula_indexes(
+        self,
+        report_name: str,
+        mapping_key_fields: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        Ensure indexes exist on target collection for formula calculations.
+        Creates indexes on mapping key fields used in queries.
+        
+        Args:
+            report_name: Target collection name (e.g., "zomato_vs_pos")
+            mapping_key_fields: Dictionary mapping collection base names to their mapping key field names
+                              e.g., {"zomato": "zomato_mapping_key", "swiggy": "swiggy_mapping_key"}
+        
+        Returns:
+            Dictionary with index creation results:
+                - success: bool
+                - indexes_created: int
+                - indexes_skipped: int
+                - errors: List[str]
+        """
+        if self.db is None:
+            return {
+                "success": False,
+                "indexes_created": 0,
+                "indexes_skipped": 0,
+                "errors": ["MongoDB is not connected"]
+            }
+        
+        if not mapping_key_fields:
+            logger.warning(f"⚠️ No mapping key fields provided for report '{report_name}', skipping index creation")
+            return {
+                "success": False,
+                "indexes_created": 0,
+                "indexes_skipped": 0,
+                "errors": ["No mapping key fields provided"]
+            }
+        
+        try:
+            target_collection = self.db[report_name]
+            
+            # Build index specifications
+            index_specs = []
+            
+            # Create index for each mapping key field
+            for base_name, mapping_key_field in mapping_key_fields.items():
+                # Single field index on mapping key
+                index_specs.append({
+                    'keys': mapping_key_field,
+                    'name': f"{mapping_key_field}_idx",
+                    'unique': False,
+                    'background': True
+                })
+            
+            # If we have multiple mapping key fields, also create a compound index for $or queries
+            # This helps with queries like: { "$or": [{field1: {$in: [...]}}, {field2: {$in: [...]}}] }
+            if len(mapping_key_fields) > 1:
+                # Create compound index with all mapping key fields
+                compound_keys = [(field, 1) for field in mapping_key_fields.values()]
+                index_specs.append({
+                    'keys': compound_keys,
+                    'name': f"{report_name}_mapping_keys_compound_idx",
+                    'unique': False,
+                    'background': True
+                })
+            
+            # Create indexes
+            indexes_created = self._create_collection_indexes(target_collection, index_specs)
+            
+            result = {
+                "success": True,
+                "indexes_created": indexes_created,
+                "indexes_skipped": len(index_specs) - indexes_created,
+                "errors": []
+            }
+            
+            if indexes_created > 0:
+                logger.info(
+                    f"✅ Created {indexes_created} index(es) for report collection '{report_name}'. "
+                    f"Mapping key fields: {list(mapping_key_fields.values())}"
+                )
+            else:
+                logger.info(
+                    f"ℹ️ All indexes already exist for report collection '{report_name}'. "
+                    f"Mapping key fields: {list(mapping_key_fields.values())}"
+                )
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Failed to create indexes for report '{report_name}': {str(e)}"
+            logger.error(f"❌ {error_msg}", exc_info=True)
+            return {
+                "success": False,
+                "indexes_created": 0,
+                "indexes_skipped": 0,
+                "errors": [error_msg]
+            }
+    
     def is_connected(self) -> bool:
         """Check if MongoDB is connected"""
         if self.client is None or self.db is None:
