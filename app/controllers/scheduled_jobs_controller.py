@@ -57,17 +57,32 @@ class ScheduledJobsController:
         
         # Common date formats to try
         date_formats = [
+            # ISO formats
             '%Y-%m-%d',                    # 2024-01-15
             '%Y-%m-%d %H:%M:%S',           # 2024-01-15 10:30:45
             '%Y-%m-%d %H:%M:%S.%f',        # 2024-01-15 10:30:45.123456
-            '%d/%m/%Y',                    # 15/01/2024
-            '%d-%m-%Y',                    # 15-01-2024
+            '%Y-%m-%d %H:%M',              # 2024-01-15 10:30
+
+            # US format with time (MM/DD/YYYY)
             '%m/%d/%Y',                    # 01/15/2024
+            '%m/%d/%Y %H:%M:%S',           # 01/15/2024 10:30:45
+            '%m/%d/%Y %H:%M',              # 01/15/2024 10:30  <- This handles "11/25/2024 0:00"
             '%m-%d-%Y',                    # 01-15-2024
+            '%m-%d-%Y %H:%M:%S',           # 01-15-2024 10:30:45
+            '%m-%d-%Y %H:%M',              # 01-15-2024 10:30
+
+            # European format with time (DD/MM/YYYY)
+            '%d/%m/%Y',                    # 15/01/2024
             '%d/%m/%Y %H:%M:%S',           # 15/01/2024 10:30:45
+            '%d/%m/%Y %H:%M',              # 15/01/2024 10:30
+            '%d-%m-%Y',                    # 15-01-2024
             '%d-%m-%Y %H:%M:%S',           # 15-01-2024 10:30:45
+            '%d-%m-%Y %H:%M',              # 15-01-2024 10:30
+
+            # Other common formats
             '%Y/%m/%d',                    # 2024/01/15
             '%Y/%m/%d %H:%M:%S',           # 2024/01/15 10:30:45
+            '%Y/%m/%d %H:%M',              # 2024/01/15 10:30
             '%d %b %Y',                    # 15 Jan 2024
             '%d %B %Y',                    # 15 January 2024
             '%b %d, %Y',                   # Jan 15, 2024
@@ -93,17 +108,27 @@ class ScheduledJobsController:
         # Try parsing with regex for common patterns
         # Match patterns like: YYYY-MM-DD, DD/MM/YYYY, etc.
         date_patterns = [
-            (r'(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2}):(\d{2}))?', '%Y-%m-%d'),
-            (r'(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?', '%d/%m/%Y'),
-            (r'(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2}):(\d{2}))?', '%d-%m-%Y'),
+            (r'(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?', '%Y-%m-%d'),
+            (r'(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?', '%d/%m/%Y'),
+            (r'(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?', '%d-%m-%Y'),
+            (r'(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?)?', '%m/%d/%Y'),
         ]
-        
+
         for pattern, base_fmt in date_patterns:
             match = re.match(pattern, value)
             if match:
                 try:
-                    if len(match.groups()) > 3:
-                        return datetime.strptime(value, f'{base_fmt} %H:%M:%S')
+                    groups = match.groups()
+                    # Count non-None groups to determine if time is present
+                    time_groups = [g for g in groups[3:] if g is not None]
+                    if time_groups:
+                        # Has time component - determine format
+                        if len(time_groups) >= 3:
+                            return datetime.strptime(value, f'{base_fmt} %H:%M:%S')
+                        elif len(time_groups) >= 2:
+                            return datetime.strptime(value, f'{base_fmt} %H:%M')
+                        else:
+                            return datetime.strptime(value, base_fmt)
                     else:
                         return datetime.strptime(value, base_fmt)
                 except ValueError:
@@ -1292,8 +1317,22 @@ class ScheduledJobsController:
             Calculated result value (or formulaValue from matching condition, or 0 if no condition matches)
         """
         try:
+            # Check if formula is just a direct field reference like "zomato.order_date"
+            direct_field_pattern = r'^(\w+)\.(\w+)$'
+            match = re.match(direct_field_pattern, formula_text.strip())
+
+            if match:
+                collection_name = match.group(1)
+                field_name = match.group(2)
+
+                # For direct field references, return the value as-is (no numeric conversion)
+                value = document.get(field_name)
+                if value is not None:
+                    logger.debug(f"Direct field reference detected: {formula_text} -> returning value as-is")
+                    return value  # Return datetime object, string, or any value directly
+
             evaluated_formula = formula_text
-            
+
             # Step 1: Replace collection.field patterns with document values
             # Pattern: collection.field (e.g., "zomato.net_amount")
             def replace_collection_field(match):
@@ -2099,7 +2138,11 @@ class ScheduledJobsController:
                 calculated_fields: Dict[str, Any] = {}
                 if existing_doc:
                     calculated_fields.update({k: v for k, v in existing_doc.items() if not k.startswith("_")})
-                
+
+                # Copy order_date from source document to ensure it's preserved in the target collection
+                if 'order_date' in doc and doc.get('order_date') is not None:
+                    calculated_fields['order_date'] = doc['order_date']
+
                 # Only log formula processing order for first batch to reduce log noise
                 if batch_number == 1:
                     formula_order = []
