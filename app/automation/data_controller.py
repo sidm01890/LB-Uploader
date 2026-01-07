@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import glob
+import re
 from datetime import datetime
 import pandas as pd
 import asyncio
@@ -28,6 +29,61 @@ os.makedirs(UPLOAD_BASE_DIR, exist_ok=True)
 # Temporary directory for chunk storage
 CHUNK_TEMP_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "temp", "chunks")
 os.makedirs(CHUNK_TEMP_DIR, exist_ok=True)
+
+
+def _detect_date_columns(df: pd.DataFrame, sample_size: int = 10) -> List[str]:
+    """
+    Detect columns that likely contain dates by sampling values and checking patterns.
+
+    Args:
+        df: DataFrame to analyze
+        sample_size: Number of rows to sample for detection
+
+    Returns:
+        List of column names that are likely date columns
+    """
+    date_columns = []
+
+    # Date patterns to look for
+    date_patterns = [
+        r'^\d{1,2}/\d{1,2}/\d{4}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?$',  # MM/DD/YYYY or DD/MM/YYYY with optional time
+        r'^\d{4}-\d{1,2}-\d{1,2}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?$',  # YYYY-MM-DD with optional time
+        r'^\d{1,2}-\d{1,2}-\d{4}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?$',  # DD-MM-YYYY or MM-DD-YYYY with optional time
+        r'^\d{4}/\d{1,2}/\d{1,2}(?:\s+\d{1,2}:\d{1,2}(?::\d{1,2})?)?$',  # YYYY/MM/DD with optional time
+    ]
+
+    # Keywords that suggest date columns
+    date_keywords = ['date', 'time', 'timestamp', 'created', 'updated', 'modified', 'dob', 'birth']
+
+    for col in df.columns:
+        # Check if column name suggests it's a date
+        col_lower = str(col).lower()
+        is_date_column = any(keyword in col_lower for keyword in date_keywords)
+
+        if not is_date_column:
+            # Sample values to check content patterns
+            sample_values = df[col].dropna().head(sample_size).astype(str)
+
+            if len(sample_values) > 0:
+                # Check if majority of non-null values match date patterns
+                date_matches = 0
+                total_checked = 0
+
+                for value in sample_values:
+                    value = value.strip()
+                    if value and value.lower() not in ['none', 'null', 'nan', '']:
+                        total_checked += 1
+                        if any(re.match(pattern, value) for pattern in date_patterns):
+                            date_matches += 1
+
+                # If more than 70% of checked values look like dates, consider it a date column
+                if total_checked > 0 and (date_matches / total_checked) > 0.7:
+                    is_date_column = True
+
+        if is_date_column:
+            date_columns.append(col)
+
+    return date_columns
 
 
 class DataController:
@@ -143,17 +199,37 @@ class DataController:
                     # Determine file type and read accordingly
                     if filename.lower().endswith('.csv'):
                         # For CSV, use header=0 to read first row as header
-                        df = pd.read_csv(file_path, header=0, keep_default_na=False)
+                        # First read without parsing dates to detect date columns
+                        df_temp = pd.read_csv(file_path, header=0, keep_default_na=False, nrows=50)  # Sample first 50 rows
+                        date_columns = _detect_date_columns(df_temp)
+                        logger.info(f"📅 Detected potential date columns for CSV: {date_columns}")
+
+                        # Re-read with date parsing if date columns found
+                        if date_columns:
+                            df = pd.read_csv(file_path, header=0, keep_default_na=False, parse_dates=date_columns)
+                            logger.info(f"✅ Parsed {len(date_columns)} date columns in CSV")
+                        else:
+                            df = pd.read_csv(file_path, header=0, keep_default_na=False)
                     else:
                         # Excel file - read first sheet by default, header=0 means first row is header
                         # keep_default_na=False prevents pandas from treating empty cells as NaN
-                        df = pd.read_excel(file_path, engine='openpyxl', header=0, keep_default_na=False)
-                    
+                        # First read without parsing dates to detect date columns
+                        df_temp = pd.read_excel(file_path, engine='openpyxl', header=0, keep_default_na=False, nrows=50)  # Sample first 50 rows
+                        date_columns = _detect_date_columns(df_temp)
+                        logger.info(f"📅 Detected potential date columns for Excel: {date_columns}")
+
+                        # Re-read with date parsing if date columns found
+                        if date_columns:
+                            df = pd.read_excel(file_path, engine='openpyxl', header=0, keep_default_na=False, parse_dates=date_columns)
+                            logger.info(f"✅ Parsed {len(date_columns)} date columns in Excel")
+                        else:
+                            df = pd.read_excel(file_path, engine='openpyxl', header=0, keep_default_na=False)
+
                     # Check if DataFrame is completely empty (no columns)
                     if df.empty and len(df.columns) == 0:
                         logger.warning(f"⚠️ File appears to be completely empty (no headers or data)")
                         return [], 0, []
-                    
+
                     # Normalize column headers (clean special characters, spaces, etc.)
                     df = normalize_dataframe_columns(df, inplace=False)
                     columns_count = len(df.columns)
@@ -301,26 +377,6 @@ class DataController:
                         logger.info(f"✅ Updated upload status to 'empty' for upload_id={upload_id}")
                     
                     return
-                
-                # File has data - check if headers file exists before processing
-                # Headers file must be uploaded first before data files can be processed
-                headers_info = mongodb_service.check_collection_headers(datasource)
-                if not headers_info.get("has_headers", False):
-                    error_message = f"Headers file must be uploaded first for collection '{datasource}'. Please upload a file containing only column headers (no data rows) before uploading data files."
-                    logger.error(f"❌ {error_message}")
-                    
-                    # Update upload status to "failed" if upload_id is provided
-                    if upload_id:
-                        mongodb_service.update_upload_status(
-                            upload_id=upload_id,
-                            status="failed",
-                            error=error_message
-                        )
-                    
-                    # Raise exception to stop processing
-                    raise ValueError(error_message)
-                
-                logger.info(f"✅ Headers file exists for '{datasource}' ({headers_info.get('headers_count', 0)} headers). Proceeding with data file processing.")
                 
                 # File has data - upload_id should already be provided from upload_data method
                 # If upload_id is not provided (shouldn't happen in normal flow), log warning
