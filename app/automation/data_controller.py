@@ -378,26 +378,6 @@ class DataController:
                     
                     return
                 
-                # File has data - check if headers file exists before processing
-                # Headers file must be uploaded first before data files can be processed
-                headers_info = mongodb_service.check_collection_headers(datasource)
-                if not headers_info.get("has_headers", False):
-                    error_message = f"Headers file must be uploaded first for collection '{datasource}'. Please upload a file containing only column headers (no data rows) before uploading data files."
-                    logger.error(f"❌ {error_message}")
-                    
-                    # Update upload status to "failed" if upload_id is provided
-                    if upload_id:
-                        mongodb_service.update_upload_status(
-                            upload_id=upload_id,
-                            status="failed",
-                            error=error_message
-                        )
-                    
-                    # Raise exception to stop processing
-                    raise ValueError(error_message)
-                
-                logger.info(f"✅ Headers file exists for '{datasource}' ({headers_info.get('headers_count', 0)} headers). Proceeding with data file processing.")
-                
                 # File has data - upload_id should already be provided from upload_data method
                 # If upload_id is not provided (shouldn't happen in normal flow), log warning
                 if not upload_id:

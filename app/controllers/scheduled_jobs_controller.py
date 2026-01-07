@@ -1328,7 +1328,6 @@ class ScheduledJobsController:
                 # For direct field references, return the value as-is (no numeric conversion)
                 value = document.get(field_name)
                 if value is not None:
-                    logger.debug(f"Direct field reference detected: {formula_text} -> returning value as-is")
                     return value  # Return datetime object, string, or any value directly
 
             evaluated_formula = formula_text
@@ -1932,6 +1931,47 @@ class ScheduledJobsController:
                     f"in report '{report_name}'"
                 )
             
+            # Copy calculated fields to dashboard collection
+            try:
+                # Determine dashboard collection name from primary collection
+                base_collection_name = primary_collection_name.replace("_processed", "")
+                dashboard_collection_name = f"{base_collection_name}_dashboard"
+                
+                logger.info(
+                    f"📊 Copying fields to dashboard collection: '{dashboard_collection_name}' "
+                    f"from calculated collection '{report_name}'"
+                )
+                
+                copy_result = await self._copy_fields_to_dashboard(
+                    report_name=report_name,
+                    calculated_collection=target_collection,
+                    dashboard_collection_name=dashboard_collection_name,
+                    formulas=formulas,
+                    primary_mapping_key_field=primary_mapping_key_field,
+                    primary_collection_name=primary_collection_name
+                )
+                
+                if copy_result.get("status") == "success":
+                    logger.info(
+                        f"✅ Successfully copied {copy_result.get('documents_copied', 0):,} documents "
+                        f"to '{dashboard_collection_name}'"
+                    )
+                elif copy_result.get("status") == "skipped":
+                    logger.info(
+                        f"ℹ️ Dashboard copy skipped: {copy_result.get('message', 'Unknown reason')}"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Dashboard copy had issues: {copy_result.get('message', 'Unknown error')}"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error copying to dashboard collection: {e}. "
+                    f"Formula processing will continue normally.",
+                    exc_info=True
+                )
+                # Don't fail the entire operation, just log the error
+            
             return {
                 "report_name": report_name,
                 "source_collection": primary_collection_name,
@@ -2079,6 +2119,281 @@ class ScheduledJobsController:
             gc.collect()
         
         return processed_count
+    
+    async def _copy_fields_to_dashboard(
+        self,
+        report_name: str,
+        calculated_collection,
+        dashboard_collection_name: str,
+        formulas: List[Dict[str, Any]],
+        primary_mapping_key_field: str,
+        primary_collection_name: str
+    ) -> Dict[str, Any]:
+        """
+        Copy calculated fields to dashboard collection after formula processing
+        
+        This function:
+        1. Finds field mapping for "total_sales" from formulas collection
+        2. Copies "total_sales" and "order_date" from calculated collection to dashboard collection
+        3. Uses batch processing for efficiency
+        
+        Args:
+            report_name: Report name (e.g., "zomato_vs_pos")
+            calculated_collection: MongoDB collection with calculated fields (e.g., zomato_vs_pos)
+            dashboard_collection_name: Target dashboard collection (e.g., "zomato_dashboard")
+            formulas: List of formulas to find field mappings
+            primary_mapping_key_field: Primary mapping key field name (e.g., "zomato_mapping_key")
+            primary_collection_name: Primary source collection name (e.g., "zomato_processed")
+        
+        Returns:
+            Dictionary with copy operation results
+        """
+        if not mongodb_service.is_connected() or mongodb_service.db is None:
+            logger.warning("⚠️ MongoDB not connected, skipping dashboard copy")
+            return {
+                "status": "skipped",
+                "message": "MongoDB not connected",
+                "documents_copied": 0
+            }
+        
+        try:
+            # Step 1: Find field mapping for "TOTAL_SALES" from formulas
+            # The logicNameKey in formulas is "TOTAL_SALES", but the actual field name
+            # in the calculated collection is determined by how it's stored (logicNameKey.lower())
+            target_logic_name_key = "TOTAL_SALES"  # Field to find in formulas
+            target_field_name = None
+            formula_text_value = None
+            
+            for formula in formulas:
+                logic_name_key = formula.get('logicNameKey', '')
+                if logic_name_key and logic_name_key.upper() == target_logic_name_key.upper():
+                    # Field is stored as lowercase of logicNameKey in calculated collection (see line 2431)
+                    # So "TOTAL_SALES" → "total_sales" in zomato_vs_pos
+                    target_field_name = logic_name_key.lower()
+                    formula_text_value = formula.get('formulaText', '')
+                    logger.info(
+                        f"✅ Found field mapping: logicNameKey '{logic_name_key}' → "
+                        f"field name '{target_field_name}' in calculated collection "
+                        f"(formulaText: '{formula_text_value}')"
+                    )
+                    break
+            
+            if not target_field_name:
+                logger.warning(
+                    f"⚠️ Field '{target_logic_name_key}' not found in formulas for report '{report_name}'. "
+                    f"Available logicNameKeys: {[f.get('logicNameKey', 'N/A') for f in formulas]}"
+                )
+                return {
+                    "status": "skipped",
+                    "message": f"Field '{target_logic_name_key}' not found in formulas",
+                    "documents_copied": 0
+                }
+            
+            # Step 2: Get dashboard collection and ensure it exists
+            dashboard_collection = mongodb_service.db[dashboard_collection_name]
+            
+            # Ensure collection exists (create if not)
+            existing_collections = mongodb_service.db.list_collection_names()
+            if dashboard_collection_name not in existing_collections:
+                temp_doc = {"_temp": True, "created_at": datetime.utcnow()}
+                result = dashboard_collection.insert_one(temp_doc)
+                dashboard_collection.delete_one({"_id": result.inserted_id})
+                logger.info(f"✅ Created dashboard collection: {dashboard_collection_name}")
+            
+            # Create index on mapping key field for faster upserts (if not exists)
+            try:
+                # Check if index already exists
+                existing_indexes = dashboard_collection.list_indexes()
+                index_names = [idx['name'] for idx in existing_indexes]
+                index_name = f"{primary_mapping_key_field}_1"
+                
+                if index_name not in index_names:
+                    dashboard_collection.create_index(
+                        [(primary_mapping_key_field, 1)],
+                        name=index_name,
+                        background=True  # Create index in background to avoid blocking
+                    )
+                    logger.info(f"✅ Created index on '{primary_mapping_key_field}' for '{dashboard_collection_name}'")
+                else:
+                    logger.debug(f"ℹ️ Index '{index_name}' already exists on '{dashboard_collection_name}'")
+            except Exception as index_error:
+                logger.warning(f"⚠️ Could not create index on '{primary_mapping_key_field}': {index_error}")
+                # Continue anyway - index might already exist or will be created later
+            
+            # Step 3: Get all documents from calculated collection
+            total_docs = calculated_collection.count_documents({})
+            if total_docs == 0:
+                logger.info(f"📊 No documents in calculated collection '{report_name}', skipping dashboard copy")
+                return {
+                    "status": "skipped",
+                    "message": "No documents in calculated collection",
+                    "documents_copied": 0
+                }
+            
+            logger.info(
+                f"📊 Copying fields from {total_docs:,} documents in '{report_name}' "
+                f"to '{dashboard_collection_name}'"
+            )
+            
+            # Step 4: Process in batches with optimizations
+            # Use larger batch size for dashboard copy (bulk writes are more efficient)
+            batch_size = 5000  # Increased from 1000 for better performance
+            copied_count = 0
+            skipped_count = 0
+            batch_operations = []
+            batch_number = 0
+            estimated_batches = (total_docs + batch_size - 1) // batch_size
+            
+            from pymongo import UpdateOne
+            
+            # OPTIMIZATION: Use projection to only fetch needed fields (reduces data transfer by ~90%)
+            projection = {
+                primary_mapping_key_field: 1,
+                "order_date": 1,
+                "orderDate": 1,
+                "date": 1,
+                "created_at": 1,
+                "_id": 0  # Don't need _id
+            }
+            
+            # Add target_field_name to projection if it exists
+            if target_field_name:
+                projection[target_field_name] = 1
+            
+            cursor = calculated_collection.find({}, projection).batch_size(batch_size)
+            
+            # OPTIMIZATION: Create datetime once per batch instead of per document
+            current_batch_timestamp = datetime.utcnow()
+            
+            try:
+                for doc in cursor:
+                    try:
+                        # Extract mapping key
+                        mapping_key_value = doc.get(primary_mapping_key_field)
+                        if not mapping_key_value:
+                            skipped_count += 1
+                            continue
+                        
+                        # Build dashboard document
+                        # OPTIMIZATION: Use batch timestamp instead of creating new datetime per document
+                        dashboard_doc = {
+                            primary_mapping_key_field: mapping_key_value,
+                            "updated_at": current_batch_timestamp
+                        }
+                        
+                        # Copy total_sales if exists (directly from calculated collection)
+                        if target_field_name and target_field_name in doc:
+                            dashboard_doc[target_field_name] = doc[target_field_name]
+                        else:
+                            # Log warning for first few missing fields
+                            if skipped_count < 5:
+                                logger.debug(
+                                    f"⚠️ Field '{target_field_name}' not found in document with "
+                                    f"mapping_key '{mapping_key_value}'. Available fields: {list(doc.keys())[:10]}"
+                                )
+                        
+                        # Copy order_date - check multiple possible field names
+                        order_date_value = (
+                            doc.get("order_date") or 
+                            doc.get("orderDate") or 
+                            doc.get("date") or
+                            doc.get("created_at")  # Fallback to created_at
+                        )
+                        if order_date_value:
+                            dashboard_doc["order_date"] = order_date_value
+                        else:
+                            # Log warning for first few missing dates
+                            if skipped_count < 5:
+                                logger.debug(
+                                    f"⚠️ order_date not found in document with "
+                                    f"mapping_key '{mapping_key_value}'"
+                                )
+                        
+                        # Only add if we have at least one field to copy
+                        if target_field_name in dashboard_doc or "order_date" in dashboard_doc:
+                            # Upsert to dashboard collection
+                            batch_operations.append(
+                                UpdateOne(
+                                    {primary_mapping_key_field: mapping_key_value},
+                                    {
+                                        "$set": dashboard_doc,
+                                        "$setOnInsert": {
+                                            "created_at": current_batch_timestamp
+                                        }
+                                    },
+                                    upsert=True
+                                )
+                            )
+                            copied_count += 1
+                        else:
+                            skipped_count += 1
+                        
+                        # Execute batch when it reaches batch_size
+                        if len(batch_operations) >= batch_size:
+                            batch_number += 1
+                            try:
+                                # OPTIMIZATION: Use ordered=False for better performance (allows parallel execution)
+                                dashboard_collection.bulk_write(batch_operations, ordered=False)
+                                logger.info(
+                                    f"📊 Copied batch {batch_number}/{estimated_batches} to '{dashboard_collection_name}': "
+                                    f"{len(batch_operations)} document(s)"
+                                )
+                            except Exception as batch_error:
+                                logger.error(
+                                    f"❌ Error executing batch {batch_number} for dashboard copy: {batch_error}"
+                                )
+                            
+                            batch_operations = []
+                            # OPTIMIZATION: Update timestamp for next batch (instead of per document)
+                            current_batch_timestamp = datetime.utcnow()
+                            # Reduced delay since we're processing larger batches
+                            await asyncio.sleep(0.005)  # Reduced from 0.01 to 0.005
+                    
+                    except Exception as e:
+                        skipped_count += 1
+                        logger.warning(f"⚠️ Error processing document for dashboard copy: {e}")
+                        continue
+                
+                # Process remaining records in final batch
+                if batch_operations:
+                    batch_number += 1
+                    try:
+                        dashboard_collection.bulk_write(batch_operations, ordered=False)
+                        logger.info(
+                            f"📊 Copied final batch {batch_number}/{estimated_batches} to '{dashboard_collection_name}': "
+                            f"{len(batch_operations)} document(s)"
+                        )
+                    except Exception as final_batch_error:
+                        logger.error(
+                            f"❌ Error executing final batch for dashboard copy: {final_batch_error}"
+                        )
+            
+            finally:
+                if cursor:
+                    cursor.close()
+                gc.collect()
+            
+            logger.info(
+                f"✅ Dashboard copy completed: {copied_count:,} documents copied, "
+                f"{skipped_count:,} skipped to '{dashboard_collection_name}'"
+            )
+            
+            return {
+                "status": "success",
+                "documents_copied": copied_count,
+                "documents_skipped": skipped_count,
+                "dashboard_collection": dashboard_collection_name,
+                "total_field": target_field_name,
+                "order_date_field": "order_date"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error copying fields to dashboard collection '{dashboard_collection_name}': {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "documents_copied": 0
+            }
     
     async def _process_formula_batch(
         self,

@@ -737,6 +737,57 @@ class MongoDBService:
             logger.error(f"❌ Error updating unique_ids for collection '{collection_name_lower}': {e}")
             raise ValueError(f"Failed to update unique_ids: {str(e)}")
     
+    def check_collection_headers(self, collection_name: str) -> Dict[str, Any]:
+        """
+        Check if headers (total_fields) exist for a collection in raw_data_collection
+        
+        Args:
+            collection_name: Name of the collection (will be converted to lowercase)
+        
+        Returns:
+            Dictionary with has_headers (bool) and headers_count (int)
+        
+        Raises:
+            ConnectionError: If MongoDB is not connected
+        """
+        if not self.is_connected():
+            raise ConnectionError("MongoDB is not connected")
+        
+        collection_name_lower = collection_name.lower()
+        
+        try:
+            raw_data_collection = self.db["raw_data_collection"]
+            
+            # Find the collection entry
+            entry = raw_data_collection.find_one({"collection_name": collection_name_lower})
+            
+            if not entry:
+                return {
+                    "has_headers": False,
+                    "headers_count": 0,
+                    "collection_name": collection_name_lower
+                }
+            
+            # Check if total_fields exists and is not empty
+            total_fields = entry.get("total_fields", [])
+            has_headers = bool(total_fields and len(total_fields) > 0)
+            
+            return {
+                "has_headers": has_headers,
+                "headers_count": len(total_fields) if total_fields else 0,
+                "collection_name": collection_name_lower,
+                "headers": total_fields if has_headers else []
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error checking headers for collection '{collection_name_lower}': {e}")
+            return {
+                "has_headers": False,
+                "headers_count": 0,
+                "collection_name": collection_name_lower,
+                "error": str(e)
+            }
+    
     def get_collection_unique_ids(self, collection_name: str) -> Optional[Dict[str, Any]]:
         """
         Get unique_ids for a collection from raw_data_collection
