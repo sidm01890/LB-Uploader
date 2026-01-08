@@ -66,8 +66,9 @@ class PropertiesLoader:
     def load_all_properties(self, active_profile: Optional[str] = None) -> Dict[str, str]:
         """
         Load all properties files in order:
-        1. application.properties (base)
-        2. application-{profile}.properties (profile-specific, overrides base)
+        1. .env file (fallback, loaded first if properties files don't exist)
+        2. application.properties (base)
+        3. application-{profile}.properties (profile-specific, overrides base)
         
         Args:
             active_profile: Active profile (dev, stage, prod). If None, detects from env
@@ -78,8 +79,24 @@ class PropertiesLoader:
         if active_profile is None:
             active_profile = os.getenv('SPRING_PROFILES_ACTIVE') or os.getenv('APP_PROFILE') or os.getenv('APP_ENV', 'dev')
         
-        # Load base application.properties
+        # First, try to load .env file as fallback (only if properties files don't exist)
         base_file = self.base_dir / 'application.properties'
+        profile_file = self.base_dir / f'application-{active_profile}.properties'
+        
+        if not base_file.exists() and not profile_file.exists():
+            # Try loading .env file as fallback
+            env_file = self.base_dir / '.env'
+            if env_file.exists():
+                load_dotenv(env_file, override=False)  # Don't override existing env vars
+                print(f"✅ Loaded .env file as fallback: {env_file.name}")
+            else:
+                # Try profile-specific .env file
+                env_profile_file = self.base_dir / f'.env.{active_profile}'
+                if env_profile_file.exists():
+                    load_dotenv(env_profile_file, override=False)
+                    print(f"✅ Loaded .env.{active_profile} file as fallback: {env_profile_file.name}")
+        
+        # Load base application.properties
         if base_file.exists():
             self.properties.update(self.load_properties_file(base_file))
             print(f"✅ Loaded base config: {base_file.name}")
@@ -87,7 +104,6 @@ class PropertiesLoader:
             print(f"⚠️  Base config not found: {base_file.name}")
         
         # Load profile-specific properties (overrides base)
-        profile_file = self.base_dir / f'application-{active_profile}.properties'
         if profile_file.exists():
             profile_props = self.load_properties_file(profile_file)
             self.properties.update(profile_props)  # Profile overrides base
