@@ -1028,10 +1028,19 @@ class ScheduledJobsController:
                 return None
             
             # Convert value to string safely
+            # Handle different types: dict, list, etc. should be converted to a meaningful string
             try:
-                value_str = str(value).strip()
+                if isinstance(value, dict):
+                    # For dicts, use a JSON-like representation or a hash
+                    import json
+                    value_str = json.dumps(value, sort_keys=True).strip()
+                elif isinstance(value, list):
+                    # For lists, join elements
+                    value_str = "_".join(str(v) for v in value).strip()
+                else:
+                    value_str = str(value).strip()
             except Exception as e:
-                logger.warning(f"⚠️ Error converting value to string for field '{field}': {e}. Skipping.")
+                logger.warning(f"⚠️ Error converting value to string for field '{field}': {type(value)}, error: {e}. Skipping.")
                 return None
             
             if value_str == "":
@@ -1041,7 +1050,11 @@ class ScheduledJobsController:
         if not values:
             return None
         
-        return "_".join(values)
+        try:
+            return "_".join(values)
+        except Exception as e:
+            logger.error(f"❌ Error joining mapping key values: {e}. Values: {values}")
+            return None
     
     def _build_condition_filter(self, conditions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -2515,7 +2528,16 @@ class ScheduledJobsController:
         current_base_name = current_collection.replace("_processed", "")
         current_mapping_key_field = f"{current_base_name}_mapping_key"
         
-        batch_keys = [key for _, key in batch_docs]
+        # Ensure all batch_keys are strings (filter out any non-string values)
+        batch_keys = []
+        for _, key in batch_docs:
+            if isinstance(key, str):
+                batch_keys.append(key)
+            elif key is not None:
+                try:
+                    batch_keys.append(str(key))
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to convert mapping key to string: {type(key)}, value: {key}, error: {e}. Skipping.")
         
         # Fetch existing target docs matching primary or current mapping keys
         existing_docs_cursor = target_collection.find(
@@ -2531,9 +2553,25 @@ class ScheduledJobsController:
         try:
             for existing in existing_docs_cursor:
                 if primary_mapping_key_field in existing:
-                    existing_map_primary[existing[primary_mapping_key_field]] = existing
+                    key_value = existing[primary_mapping_key_field]
+                    # Ensure key is a string before using as dictionary key
+                    if not isinstance(key_value, str):
+                        try:
+                            key_value = str(key_value)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to convert primary mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                            continue
+                    existing_map_primary[key_value] = existing
                 if current_mapping_key_field in existing:
-                    existing_map_current[existing[current_mapping_key_field]] = existing
+                    key_value = existing[current_mapping_key_field]
+                    # Ensure key is a string before using as dictionary key
+                    if not isinstance(key_value, str):
+                        try:
+                            key_value = str(key_value)
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to convert current mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                            continue
+                    existing_map_current[key_value] = existing
         finally:
             # Ensure cursor is closed
             if existing_docs_cursor:
@@ -2545,6 +2583,15 @@ class ScheduledJobsController:
         
         for doc, mapping_key_value in batch_docs:
             try:
+                # Ensure mapping_key_value is a string before using as dictionary key
+                if not isinstance(mapping_key_value, str):
+                    try:
+                        mapping_key_value = str(mapping_key_value)
+                    except Exception as e:
+                        logger.error(f"❌ Failed to convert mapping_key_value to string in batch processing: {type(mapping_key_value)}, error: {e}. Skipping document.")
+                        error_count += 1
+                        continue
+                
                 existing_doc = existing_map_primary.get(mapping_key_value) or existing_map_current.get(mapping_key_value)
                 
                 calculated_fields: Dict[str, Any] = {}
@@ -2598,6 +2645,15 @@ class ScheduledJobsController:
                 
                 # Note: Delta columns and reasons are calculated AFTER all collections are processed
                 # This ensures all fields from all collections are available for delta/reason calculations
+                
+                # Ensure mapping_key_value is still a string (double-check)
+                if not isinstance(mapping_key_value, str):
+                    try:
+                        mapping_key_value = str(mapping_key_value)
+                    except Exception as e:
+                        logger.error(f"❌ Failed to convert mapping_key_value to string before filter query: {type(mapping_key_value)}, error: {e}. Skipping document.")
+                        error_count += 1
+                        continue
                 
                 calculated_fields[current_mapping_key_field] = mapping_key_value
                 calculated_fields['processed_at'] = datetime.utcnow()
