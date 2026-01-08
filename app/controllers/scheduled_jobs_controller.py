@@ -1939,16 +1939,23 @@ class ScheduledJobsController:
                                     f"({len(batch_docs)} documents)"
                                 )
                                 
-                                processed, errors = await self._process_formula_batch(
-                                    batch_docs,
-                                    collection_name,
-                                    primary_mapping_key_field,
-                                    primary_collection_name,
-                                    mapping_key_fields,
-                                    collection_formulas,
-                                    target_collection,
-                                    batch_number
-                                )
+                                try:
+                                    processed, errors = await self._process_formula_batch(
+                                        batch_docs,
+                                        collection_name,
+                                        primary_mapping_key_field,
+                                        primary_collection_name,
+                                        mapping_key_fields,
+                                        collection_formulas,
+                                        target_collection,
+                                        batch_number
+                                    )
+                                except Exception as batch_error:
+                                    import traceback
+                                    logger.error(f"❌ Error in _process_formula_batch: {batch_error}")
+                                    logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                                    logger.error(f"❌ Batch details: collection={collection_name}, batch_size={len(batch_docs)}, first_doc_keys={list(batch_docs[0][0].keys())[:10] if batch_docs else 'N/A'}")
+                                    raise
                                 total_processed += processed
                                 total_errors += errors
                                 
@@ -1979,16 +1986,23 @@ class ScheduledJobsController:
                             f"({len(batch_docs)} documents)"
                         )
                         
-                        processed, errors = await self._process_formula_batch(
-                            batch_docs,
-                            collection_name,
-                            primary_mapping_key_field,
-                            primary_collection_name,
-                            mapping_key_fields,
-                            collection_formulas,
-                            target_collection,
-                            batch_number
-                        )
+                        try:
+                            processed, errors = await self._process_formula_batch(
+                                batch_docs,
+                                collection_name,
+                                primary_mapping_key_field,
+                                primary_collection_name,
+                                mapping_key_fields,
+                                collection_formulas,
+                                target_collection,
+                                batch_number
+                            )
+                        except Exception as batch_error:
+                            import traceback
+                            logger.error(f"❌ Error in final batch _process_formula_batch: {batch_error}")
+                            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                            logger.error(f"❌ Batch details: collection={collection_name}, batch_size={len(batch_docs)}, first_doc_keys={list(batch_docs[0][0].keys())[:10] if batch_docs else 'N/A'}")
+                            raise
                         total_processed += processed
                         total_errors += errors
                         
@@ -2525,8 +2539,27 @@ class ScheduledJobsController:
         """
         from pymongo import UpdateOne
         
-        current_base_name = current_collection.replace("_processed", "")
-        current_mapping_key_field = f"{current_base_name}_mapping_key"
+        # Validate inputs
+        if not isinstance(current_collection, str):
+            raise TypeError(f"current_collection must be str, got {type(current_collection)}")
+        if not isinstance(primary_mapping_key_field, str):
+            raise TypeError(f"primary_mapping_key_field must be str, got {type(primary_mapping_key_field)}")
+        if not isinstance(primary_collection_name, str):
+            raise TypeError(f"primary_collection_name must be str, got {type(primary_collection_name)}")
+        if not isinstance(mapping_key_fields, list):
+            raise TypeError(f"mapping_key_fields must be list, got {type(mapping_key_fields)}")
+        # Ensure all items in mapping_key_fields are strings
+        mapping_key_fields = [f for f in mapping_key_fields if isinstance(f, str)]
+        
+        try:
+            current_base_name = current_collection.replace("_processed", "")
+            current_mapping_key_field = f"{current_base_name}_mapping_key"
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Error creating mapping key field name: {e}")
+            logger.error(f"❌ current_collection type: {type(current_collection)}, value: {current_collection}")
+            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+            raise
         
         # Ensure all batch_keys are strings (filter out any non-string values)
         batch_keys = []
@@ -2540,14 +2573,23 @@ class ScheduledJobsController:
                     logger.warning(f"⚠️ Failed to convert mapping key to string: {type(key)}, value: {key}, error: {e}. Skipping.")
         
         # Fetch existing target docs matching primary or current mapping keys
-        existing_docs_cursor = target_collection.find(
-            {
-                "$or": [
-                    {primary_mapping_key_field: {"$in": batch_keys}},
-                    {current_mapping_key_field: {"$in": batch_keys}}
-                ]
-            }
-        )
+        try:
+            existing_docs_cursor = target_collection.find(
+                {
+                    "$or": [
+                        {primary_mapping_key_field: {"$in": batch_keys}},
+                        {current_mapping_key_field: {"$in": batch_keys}}
+                    ]
+                }
+            )
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Error in MongoDB find query: {e}")
+            logger.error(f"❌ primary_mapping_key_field: {type(primary_mapping_key_field)}={primary_mapping_key_field}")
+            logger.error(f"❌ current_mapping_key_field: {type(current_mapping_key_field)}={current_mapping_key_field}")
+            logger.error(f"❌ batch_keys types: {[type(k) for k in batch_keys[:5]]}")
+            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+            raise
         existing_map_primary: Dict[str, Dict[str, Any]] = {}
         existing_map_current: Dict[str, Dict[str, Any]] = {}
         try:
