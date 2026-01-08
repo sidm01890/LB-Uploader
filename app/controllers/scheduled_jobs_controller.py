@@ -2574,46 +2574,70 @@ class ScheduledJobsController:
         
         # Fetch existing target docs matching primary or current mapping keys
         try:
-            existing_docs_cursor = target_collection.find(
-                {
+            # Double-check that all values are strings
+            if not isinstance(primary_mapping_key_field, str):
+                raise TypeError(f"primary_mapping_key_field must be str, got {type(primary_mapping_key_field)}")
+            if not isinstance(current_mapping_key_field, str):
+                raise TypeError(f"current_mapping_key_field must be str, got {type(current_mapping_key_field)}")
+            
+            # Ensure all batch_keys are strings (final check)
+            validated_batch_keys = []
+            for key in batch_keys:
+                if isinstance(key, str):
+                    validated_batch_keys.append(key)
+                elif key is not None:
+                    try:
+                        validated_batch_keys.append(str(key))
+                    except Exception:
+                        logger.warning(f"⚠️ Skipping non-string key in batch_keys: {type(key)}")
+            
+            if not validated_batch_keys:
+                logger.warning("⚠️ No valid batch_keys after validation, skipping existing docs fetch")
+                existing_docs_cursor = None
+            else:
+                query = {
                     "$or": [
-                        {primary_mapping_key_field: {"$in": batch_keys}},
-                        {current_mapping_key_field: {"$in": batch_keys}}
+                        {primary_mapping_key_field: {"$in": validated_batch_keys}},
+                        {current_mapping_key_field: {"$in": validated_batch_keys}}
                     ]
                 }
-            )
+                existing_docs_cursor = target_collection.find(query)
         except Exception as e:
             import traceback
             logger.error(f"❌ Error in MongoDB find query: {e}")
             logger.error(f"❌ primary_mapping_key_field: {type(primary_mapping_key_field)}={primary_mapping_key_field}")
             logger.error(f"❌ current_mapping_key_field: {type(current_mapping_key_field)}={current_mapping_key_field}")
-            logger.error(f"❌ batch_keys types: {[type(k) for k in batch_keys[:5]]}")
+            logger.error(f"❌ batch_keys count: {len(batch_keys)}, types: {[type(k) for k in batch_keys[:5]]}")
+            logger.error(f"❌ target_collection type: {type(target_collection)}")
             logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
             raise
         existing_map_primary: Dict[str, Dict[str, Any]] = {}
         existing_map_current: Dict[str, Dict[str, Any]] = {}
         try:
-            for existing in existing_docs_cursor:
-                if primary_mapping_key_field in existing:
-                    key_value = existing[primary_mapping_key_field]
-                    # Ensure key is a string before using as dictionary key
-                    if not isinstance(key_value, str):
-                        try:
-                            key_value = str(key_value)
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed to convert primary mapping key to string: {type(key_value)}, error: {e}. Skipping.")
-                            continue
-                    existing_map_primary[key_value] = existing
-                if current_mapping_key_field in existing:
-                    key_value = existing[current_mapping_key_field]
-                    # Ensure key is a string before using as dictionary key
-                    if not isinstance(key_value, str):
-                        try:
-                            key_value = str(key_value)
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed to convert current mapping key to string: {type(key_value)}, error: {e}. Skipping.")
-                            continue
-                    existing_map_current[key_value] = existing
+            if existing_docs_cursor is None:
+                logger.warning("⚠️ No existing docs cursor, skipping existing docs fetch")
+            else:
+                for existing in existing_docs_cursor:
+                    if primary_mapping_key_field in existing:
+                        key_value = existing[primary_mapping_key_field]
+                        # Ensure key is a string before using as dictionary key
+                        if not isinstance(key_value, str):
+                            try:
+                                key_value = str(key_value)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to convert primary mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                                continue
+                        existing_map_primary[key_value] = existing
+                    if current_mapping_key_field in existing:
+                        key_value = existing[current_mapping_key_field]
+                        # Ensure key is a string before using as dictionary key
+                        if not isinstance(key_value, str):
+                            try:
+                                key_value = str(key_value)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to convert current mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                                continue
+                        existing_map_current[key_value] = existing
         finally:
             # Ensure cursor is closed
             if existing_docs_cursor:
