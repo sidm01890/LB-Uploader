@@ -1704,18 +1704,18 @@ class ScheduledJobsController:
                     if dependent_collections:
                         # Assign to the first dependent collection (or primary if available)
                         # Prefer non-primary collections first to ensure dependencies are calculated
-                        target_collection = None
+                        target_collection_name = None
                         for coll in collection_order:
                             if coll in dependent_collections:
-                                target_collection = coll
+                                target_collection_name = coll
                                 break
                         
                         # If no match in collection_order, use the first dependent collection
-                        if not target_collection:
-                            target_collection = list(dependent_collections)[0]
+                        if not target_collection_name:
+                            target_collection_name = list(dependent_collections)[0]
                         
-                        formulas_by_collection.setdefault(target_collection, []).append(formula)
-                        logger.debug(f"📋 Added formula '{logic_name_key}' (depends on {calc_refs}) to collection '{target_collection}' based on dependencies")
+                        formulas_by_collection.setdefault(target_collection_name, []).append(formula)
+                        logger.debug(f"📋 Added formula '{logic_name_key}' (depends on {calc_refs}) to collection '{target_collection_name}' based on dependencies")
                     else:
                         # No calculated field dependencies found, add to formulas_without_collection
                         formulas_without_collection.append(formula)
