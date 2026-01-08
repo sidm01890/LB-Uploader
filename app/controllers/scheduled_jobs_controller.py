@@ -1957,6 +1957,26 @@ class ScheduledJobsController:
                                     )
                                 continue
                             
+                            # Save mapping key back to source collection for future reference
+                            # This ensures source documents have their mapping keys for matching
+                            mapping_key_field_name = f"{base_name}_mapping_key"
+                            try:
+                                update_result = source_collection.update_one(
+                                    {"_id": doc_id},
+                                    {"$set": {mapping_key_field_name: mapping_key_value}},
+                                    upsert=False
+                                )
+                                # Log first few updates for verification
+                                if total_processed < 3:
+                                    logger.info(
+                                        f"🔑 Saved mapping key to source collection '{collection_name}': "
+                                        f"{mapping_key_field_name} = {mapping_key_value} "
+                                        f"(from fields: {mapping_key_fields})"
+                                    )
+                            except Exception as e:
+                                # Log but don't fail - mapping key will still be used for target collection
+                                logger.warning(f"⚠️ Could not update mapping key in source collection '{collection_name}': {e}")
+                            
                             batch_docs.append((doc, mapping_key_value))
                             
                             if len(batch_docs) >= batch_size:
