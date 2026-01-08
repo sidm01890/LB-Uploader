@@ -1640,6 +1640,16 @@ class ScheduledJobsController:
                     collection_order.append(source_collection)
                 formulas_meta.append(meta)
             
+            # Build a map of calculated field names to their source collections
+            # This helps assign formulas without source_collection to the correct collection
+            calculated_field_to_collection: Dict[str, str] = {}
+            for meta in formulas_meta:
+                source_collection = meta.get("source_collection")
+                formula = meta["formula"]
+                logic_name_key = formula.get("logicNameKey", "")
+                if source_collection and logic_name_key:
+                    calculated_field_to_collection[logic_name_key.upper()] = source_collection
+            
             # Group formulas by their primary source collection
             # Include ALL formulas - those with source_collection and those without
             formulas_by_collection: Dict[str, List[Dict[str, Any]]] = {}
@@ -1652,9 +1662,36 @@ class ScheduledJobsController:
                     formulas_by_collection.setdefault(source_collection, []).append(formula)
                     logger.debug(f"📋 Added formula '{logic_name_key}' to collection '{source_collection}'")
                 else:
-                    # Formulas without source_collection should be processed with the primary collection
-                    formulas_without_collection.append(formula)
-                    logger.debug(f"📋 Added formula '{logic_name_key}' to formulas_without_collection (no source_collection)")
+                    # Formulas without source_collection: check if they depend on calculated fields
+                    # from other collections and assign them to the appropriate collection
+                    formula_text = formula.get("formulaText", "")
+                    calc_refs = meta.get("calculated_field_references", [])
+                    
+                    # Find which collection(s) the calculated field dependencies come from
+                    dependent_collections = set()
+                    for calc_ref in calc_refs:
+                        if calc_ref in calculated_field_to_collection:
+                            dependent_collections.add(calculated_field_to_collection[calc_ref])
+                    
+                    if dependent_collections:
+                        # Assign to the first dependent collection (or primary if available)
+                        # Prefer non-primary collections first to ensure dependencies are calculated
+                        target_collection = None
+                        for coll in collection_order:
+                            if coll in dependent_collections:
+                                target_collection = coll
+                                break
+                        
+                        # If no match in collection_order, use the first dependent collection
+                        if not target_collection:
+                            target_collection = list(dependent_collections)[0]
+                        
+                        formulas_by_collection.setdefault(target_collection, []).append(formula)
+                        logger.debug(f"📋 Added formula '{logic_name_key}' (depends on {calc_refs}) to collection '{target_collection}' based on dependencies")
+                    else:
+                        # No calculated field dependencies found, add to formulas_without_collection
+                        formulas_without_collection.append(formula)
+                        logger.debug(f"📋 Added formula '{logic_name_key}' to formulas_without_collection (no source_collection, no calculated field dependencies)")
             
             # If no collections found but we have formulas, we need at least one collection to process
             # Try to determine primary collection from mapping_keys
