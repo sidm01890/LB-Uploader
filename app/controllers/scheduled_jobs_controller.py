@@ -1822,7 +1822,7 @@ class ScheduledJobsController:
                 
                 base_name = collection_name.replace("_processed", "")
                 # Ensure mapping_keys and conditions are dicts with string keys
-                # Get mapping_key_fields - ensure it's always a list
+                # Get mapping_key_fields - ensure it's always a list of strings
                 if not isinstance(mapping_keys, dict):
                     logger.error(f"❌ mapping_keys is not a dict: {type(mapping_keys)}")
                     mapping_key_fields = []
@@ -1831,7 +1831,10 @@ class ScheduledJobsController:
                     if mapping_key_value is None:
                         mapping_key_fields = []
                     elif isinstance(mapping_key_value, list):
-                        mapping_key_fields = mapping_key_value
+                        # Filter to ensure all items are strings
+                        mapping_key_fields = [f for f in mapping_key_value if isinstance(f, str)]
+                        if len(mapping_key_fields) != len(mapping_key_value):
+                            logger.warning(f"⚠️ Filtered out non-string items from mapping_key_fields for '{base_name}'. Original: {mapping_key_value}, Filtered: {mapping_key_fields}")
                     else:
                         logger.warning(f"⚠️ mapping_key_fields for '{base_name}' is not a list: {type(mapping_key_value)}, value: {mapping_key_value}. Using empty list.")
                         mapping_key_fields = []
@@ -1890,6 +1893,16 @@ class ScheduledJobsController:
                             
                             # Build mapping key (pass doc_id for fallback when mapping_key_fields is empty)
                             mapping_key_value = self._build_mapping_key(doc, mapping_key_fields, doc_id=doc_id)
+                            
+                            # Ensure mapping_key_value is a string (not dict or other type)
+                            if mapping_key_value is not None and not isinstance(mapping_key_value, str):
+                                logger.warning(f"⚠️ mapping_key_value is not a string: {type(mapping_key_value)}, value: {mapping_key_value}. Converting to string.")
+                                try:
+                                    mapping_key_value = str(mapping_key_value)
+                                except Exception as e:
+                                    logger.error(f"❌ Failed to convert mapping_key_value to string: {e}. Skipping document.")
+                                    skipped_count += 1
+                                    continue
                             
                             # If still None after fallback, skip this document (should rarely happen)
                             if mapping_key_value is None:
