@@ -4,7 +4,6 @@ Handles automated file downloads, processing, and notifications
 """
 
 import asyncio
-import paramiko
 import ftplib
 import logging
 from typing import Dict, List, Any, Optional, Tuple
@@ -20,6 +19,18 @@ import shutil
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+# Try to import paramiko, but make it optional
+try:
+    import paramiko
+    PARAMIKO_AVAILABLE = True
+except ImportError:
+    paramiko = None
+    PARAMIKO_AVAILABLE = False
+    logger.warning(
+        "⚠️ paramiko is not installed. SFTP functionality will be disabled. "
+        "Install it with: pip install paramiko>=3.4.0"
+    )
 
 class ConnectionType(Enum):
     SFTP = "sftp"
@@ -69,6 +80,13 @@ class SFTPAutomationService:
         self.connection_pool = {}
         self.download_history = []
         self.is_running = False
+        
+        # Check if paramiko is available for SFTP connections
+        if config.connection_type == ConnectionType.SFTP and not PARAMIKO_AVAILABLE:
+            logger.warning(
+                f"⚠️ SFTP connection type requested but paramiko is not installed. "
+                f"SFTP functionality will not work. Install with: pip install paramiko>=3.4.0"
+            )
         
         logger.info(f"SFTP Automation Service initialized for {config.host}")
     
@@ -203,6 +221,12 @@ class SFTPAutomationService:
     
     async def _create_sftp_connection(self):
         """Create SFTP connection using paramiko"""
+        
+        if not PARAMIKO_AVAILABLE:
+            raise ImportError(
+                "paramiko is not installed. Cannot create SFTP connection. "
+                "Install it with: pip install paramiko>=3.4.0"
+            )
         
         try:
             ssh_client = paramiko.SSHClient()

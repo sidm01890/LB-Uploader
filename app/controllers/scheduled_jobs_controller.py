@@ -1018,13 +1018,28 @@ class ScheduledJobsController:
         
         values = []
         for field in key_fields:
+            # Ensure field is a string
+            if not isinstance(field, str):
+                logger.warning(f"⚠️ Invalid field type in key_fields: {type(field)}, value: {field}. Skipping.")
+                continue
+            
             value = document.get(field)
             if value is None:
                 return None
-            value_str = str(value).strip()
+            
+            # Convert value to string safely
+            try:
+                value_str = str(value).strip()
+            except Exception as e:
+                logger.warning(f"⚠️ Error converting value to string for field '{field}': {e}. Skipping.")
+                return None
+            
             if value_str == "":
                 return None
             values.append(value_str)
+        
+        if not values:
+            return None
         
         return "_".join(values)
     
@@ -1743,7 +1758,8 @@ class ScheduledJobsController:
                     logger.info(f"    - {f.get('logicNameKey', 'N/A')} = {f.get('formulaText', 'N/A')}")
             
             # Ensure primary is first, others follow in discovery order
-            collections_to_process = collection_order + [c for c in formulas_by_collection.keys() if c not in collection_order]
+            # Filter to ensure all collection names are strings
+            collections_to_process = collection_order + [c for c in formulas_by_collection.keys() if c not in collection_order and isinstance(c, str)]
             
             # Log all formulas and what they calculate (for dependency tracking)
             formula_outputs = {}  # Maps logicNameKey -> formula index
@@ -1799,9 +1815,40 @@ class ScheduledJobsController:
             total_errors = 0
             
             for collection_name in collections_to_process:
+                # Ensure collection_name is a string
+                if not isinstance(collection_name, str):
+                    logger.error(f"❌ Invalid collection name type: {type(collection_name)}, value: {collection_name}. Skipping.")
+                    continue
+                
                 base_name = collection_name.replace("_processed", "")
-                mapping_key_fields = mapping_keys.get(base_name, []) or []
-                condition_list = conditions.get(base_name, []) or []
+                # Ensure mapping_keys and conditions are dicts with string keys
+                # Get mapping_key_fields - ensure it's always a list
+                if not isinstance(mapping_keys, dict):
+                    logger.error(f"❌ mapping_keys is not a dict: {type(mapping_keys)}")
+                    mapping_key_fields = []
+                else:
+                    mapping_key_value = mapping_keys.get(base_name)
+                    if mapping_key_value is None:
+                        mapping_key_fields = []
+                    elif isinstance(mapping_key_value, list):
+                        mapping_key_fields = mapping_key_value
+                    else:
+                        logger.warning(f"⚠️ mapping_key_fields for '{base_name}' is not a list: {type(mapping_key_value)}, value: {mapping_key_value}. Using empty list.")
+                        mapping_key_fields = []
+                
+                # Get condition_list - ensure it's always a list
+                if not isinstance(conditions, dict):
+                    logger.error(f"❌ conditions is not a dict: {type(conditions)}")
+                    condition_list = []
+                else:
+                    condition_value = conditions.get(base_name)
+                    if condition_value is None:
+                        condition_list = []
+                    elif isinstance(condition_value, list):
+                        condition_list = condition_value
+                    else:
+                        logger.warning(f"⚠️ condition_list for '{base_name}' is not a list: {type(condition_value)}, value: {condition_value}. Using empty list.")
+                        condition_list = []
                 collection_formulas = formulas_by_collection.get(collection_name, [])
                 
                 logger.info(f"📋 Processing collection '{collection_name}': Found {len(collection_formulas)} formula(s) before sorting")
