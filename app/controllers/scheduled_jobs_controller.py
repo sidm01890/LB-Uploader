@@ -1388,36 +1388,46 @@ class ScheduledJobsController:
             # Pattern: CALCULATED_FIELD_NAME or CALCULATED_TOTAL_AMOUNT (standalone, not collection.field)
             # We need to replace ALL calculated field references in the formula
             # Formulas reference fields in uppercase (e.g., COMMISSION_VALUE), but we store them in lowercase
-            for calc_key, calc_value in calculated_fields.items():
-                # Skip metadata fields
-                if calc_key in ['processed_at', 'updated_at'] or calc_key.endswith('_mapping_key'):
-                    continue
-                
-                # Convert stored key (lowercase) to uppercase for matching
-                upper_key = calc_key.upper()
-                
-                # Replace uppercase version in formula (e.g., "COMMISSION_VALUE" -> value)
-                # Use word boundaries to ensure we match the whole field name
-                pattern = r'\b' + re.escape(upper_key) + r'\b'
-                
-                # Check if this field is referenced in the formula
-                if re.search(pattern, evaluated_formula):
-                    value_str = str(calc_value) if calc_value is not None else "0"
-                    # Replace all occurrences
-                    evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
-                    
             
-            # Also try replacing with original case (in case formula uses lowercase)
+            # Fix 3: Improved case conversion matching with multiple strategies
+            # Track which fields have been replaced to avoid double replacement
+            replaced_fields = set()
+            
             for calc_key, calc_value in calculated_fields.items():
                 # Skip metadata fields
                 if calc_key in ['processed_at', 'updated_at'] or calc_key.endswith('_mapping_key'):
                     continue
                 
-                # Try original case (lowercase) as well
-                pattern = r'\b' + re.escape(calc_key) + r'\b'
-                if re.search(pattern, evaluated_formula):
-                    value_str = str(calc_value) if calc_value is not None else "0"
-                    evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
+                # Skip if already replaced
+                if calc_key in replaced_fields:
+                    continue
+                
+                value_str = str(calc_value) if calc_value is not None else "0"
+                
+                # Strategy 1: Exact match (lowercase) - check if formula uses lowercase
+                if calc_key in evaluated_formula:
+                    # Use word boundaries to ensure whole word match
+                    pattern_exact = r'(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
+                    if re.search(pattern_exact, evaluated_formula):
+                        evaluated_formula = re.sub(pattern_exact, value_str, evaluated_formula)
+                        replaced_fields.add(calc_key)
+                        continue
+                
+                # Strategy 2: Uppercase match with improved word boundaries (Fix 8)
+                upper_key = calc_key.upper()
+                # Fix 8: More robust pattern that handles edge cases
+                pattern_upper = r'(?<![A-Za-z0-9_])' + re.escape(upper_key) + r'(?![A-Za-z0-9_])'
+                if re.search(pattern_upper, evaluated_formula):
+                    evaluated_formula = re.sub(pattern_upper, value_str, evaluated_formula)
+                    replaced_fields.add(calc_key)
+                    continue
+                
+                # Strategy 3: Case-insensitive match (fallback)
+                pattern_ci = r'(?i)(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
+                if re.search(pattern_ci, evaluated_formula):
+                    evaluated_formula = re.sub(pattern_ci, value_str, evaluated_formula, flags=re.IGNORECASE)
+                    replaced_fields.add(calc_key)
+                    continue
                     
             
             # Step 3: Check for any remaining calculated field references that weren't replaced
@@ -2708,9 +2718,25 @@ class ScheduledJobsController:
                 
                 existing_doc = existing_map_primary.get(mapping_key_value) or existing_map_current.get(mapping_key_value)
                 
+                # Fix 1: Clear existing calculated field values before recalculating
+                # Only load non-calculated fields from existing document (like order_date, mapping keys)
+                # Calculated fields will be recalculated below, so we don't want stale values interfering
                 calculated_fields: Dict[str, Any] = {}
                 if existing_doc:
-                    calculated_fields.update({k: v for k, v in existing_doc.items() if not k.startswith("_")})
+                    # Get list of calculated field names (from formula logicNameKeys) to exclude
+                    calculated_field_names = {f.get('logicNameKey', '').lower() for f in collection_formulas if f.get('logicNameKey')}
+                    
+                    # Only copy non-calculated fields from existing document
+                    excluded_fields = ['processed_at', 'updated_at']
+                    for k, v in existing_doc.items():
+                        if not k.startswith("_") and k not in excluded_fields:
+                            # Only copy if it's NOT a calculated field (calculated fields will be recalculated)
+                            if k not in calculated_field_names:
+                                calculated_fields[k] = v
+                            else:
+                                # Log that we're skipping this calculated field (will be recalculated)
+                                if batch_number == 1 and processed_count == 0:
+                                    logger.debug(f"🔄 Skipping existing calculated field '{k}' - will be recalculated")
 
                 # Copy order_date from source document to ensure it's preserved in the target collection
                 if 'order_date' in doc and doc.get('order_date') is not None:
@@ -2737,12 +2763,45 @@ class ScheduledJobsController:
                     
                     calculated_field_name = logic_name_key.lower()
                     
-                    # Reduced logging - only log for first document of first batch
-                    if batch_number == 1 and processed_count == 0 and formula_idx == 0:
+                    # Fix 2: Validate dependencies before formula evaluation
+                    # Parse formula to check dependencies
+                    meta = self._parse_formula_text(formula_text)
+                    calc_deps = meta.get('calculated_field_references', [])
+                    
+                    # Check if all dependencies are available
+                    if calc_deps:
+                        available_upper = [k.upper() for k in calculated_fields.keys() 
+                                          if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
+                        missing = [dep for dep in calc_deps if dep.upper() not in available_upper]
+                        
+                        if missing:
+                            logger.error(
+                                f"❌ Cannot evaluate '{logic_name_key}' (position {formula_idx + 1}): "
+                                f"Missing dependencies {missing}. "
+                                f"Available calculated fields: {available_upper}. "
+                                f"Formula: {formula_text}. "
+                                f"This formula will be skipped."
+                            )
+                            # Skip this formula - don't evaluate it
+                            # Keep existing value if it exists, otherwise use 0
+                            if calculated_field_name not in calculated_fields:
+                                calculated_fields[calculated_field_name] = 0
+                                logger.warning(f"⚠️ Set '{logic_name_key}' to 0 (no existing value)")
+                            continue  # Skip to next formula
+                    
+                    # Fix 7: Enhanced debug logging for formula evaluation
+                    if batch_number == 1 and processed_count < 3:  # Log first 3 documents for debugging
                         available_calc_fields = [k.upper() for k in calculated_fields.keys() 
                                               if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
-                        logger.debug(f"[Batch {batch_number}] Evaluating formula '{logic_name_key}': {formula_text}")
-                        logger.debug(f"Available calculated fields: {available_calc_fields}")
+                        logger.info(
+                            f"[Doc {processed_count + 1}, Formula {formula_idx + 1}] Evaluating '{logic_name_key}': {formula_text}"
+                        )
+                        logger.info(f"  Available calculated fields: {available_calc_fields}")
+                        if calc_deps:
+                            logger.info(f"  Dependencies needed: {calc_deps}")
+                            found_deps = [d for d in calc_deps if d.upper() in available_calc_fields]
+                            if found_deps:
+                                logger.info(f"  ✅ Found dependencies: {found_deps}")
                     
                     calculated_value = self._evaluate_formula(
                         formula_text,
@@ -2751,11 +2810,32 @@ class ScheduledJobsController:
                         formula_conditions if formula_conditions else None
                     )
                     
+                    # Fix 4: Better None handling - log error and investigate
                     if calculated_value is None:
-                        logger.warning(f"⚠️ Formula '{logic_name_key}' (position {formula_idx + 1}) returned None, using 0")
-                        calculated_value = 0
+                        logger.error(
+                            f"❌ Formula '{logic_name_key}' (position {formula_idx + 1}) returned None. "
+                            f"Formula: {formula_text}. "
+                            f"Available calculated fields: {[k.upper() for k in calculated_fields.keys() if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]}. "
+                            f"This indicates a dependency issue or formula evaluation error."
+                        )
+                        # Option 1: Keep existing value if it exists
+                        if calculated_field_name in calculated_fields:
+                            calculated_value = calculated_fields[calculated_field_name]
+                            logger.warning(f"⚠️ Keeping existing value for '{logic_name_key}': {calculated_value}")
+                        else:
+                            # Option 2: Use 0 only if no existing value
+                            calculated_value = 0
+                            logger.warning(f"⚠️ No existing value found for '{logic_name_key}', using 0")
                     
+                    # Fix 6: Always recalculate and log if value changed
+                    old_value = calculated_fields.get(calculated_field_name)
                     calculated_fields[calculated_field_name] = calculated_value
+                    
+                    # Log if value changed (for debugging)
+                    if old_value is not None and old_value != calculated_value and batch_number == 1 and processed_count < 3:
+                        logger.info(
+                            f"🔄 Recalculated '{logic_name_key}': {old_value} → {calculated_value}"
+                        )
                 
                 # Note: Delta columns and reasons are calculated AFTER all collections are processed
                 # This ensures all fields from all collections are available for delta/reason calculations
