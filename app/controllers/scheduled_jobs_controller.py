@@ -1327,7 +1327,8 @@ class ScheduledJobsController:
         formula_text: str,
         document: Dict[str, Any],
         calculated_fields: Dict[str, Any],
-        conditions: Optional[List[Dict[str, Any]]] = None
+        conditions: Optional[List[Dict[str, Any]]] = None,
+        enable_debug_logging: bool = False
     ) -> Any:
         """
         Evaluate a formula using eval() with document values.
@@ -1340,11 +1341,16 @@ class ScheduledJobsController:
             document: Source document with field values
             calculated_fields: Dictionary of previously calculated fields
             conditions: Optional list of condition dictionaries to apply after formula evaluation
+            enable_debug_logging: If True, log detailed information about formula evaluation
         
         Returns:
             Calculated result value (or formulaValue from matching condition, or 0 if no condition matches)
         """
         try:
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Starting evaluation of: {formula_text}")
+                logger.info(f"🔍 [FORMULA DEBUG] Available calculated fields: {list(calculated_fields.keys())}")
+            
             # Check if formula is just a direct field reference like "zomato.order_date"
             direct_field_pattern = r'^(\w+)\.(\w+)$'
             match = re.match(direct_field_pattern, formula_text.strip())
@@ -1356,9 +1362,13 @@ class ScheduledJobsController:
                 # For direct field references, return the value as-is (no numeric conversion)
                 value = document.get(field_name)
                 if value is not None:
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] Direct field reference: {field_name} = {value}")
                     return value  # Return datetime object, string, or any value directly
 
             evaluated_formula = formula_text
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Initial formula: {evaluated_formula}")
 
             # Step 1: Replace collection.field patterns with document values
             # Pattern: collection.field (e.g., "zomato.net_amount")
@@ -1378,22 +1388,29 @@ class ScheduledJobsController:
                 except (ValueError, TypeError):
                     return "0"
             
+            formula_before_step1 = evaluated_formula
             evaluated_formula = re.sub(
                 r'(\w+)\.(\w+)',
                 replace_collection_field,
                 evaluated_formula
             )
+            if enable_debug_logging and formula_before_step1 != evaluated_formula:
+                logger.info(f"🔍 [FORMULA DEBUG] After Step 1 (collection.field replacement): {evaluated_formula}")
             
             # Step 2: Replace standalone calculated field references (uppercase, no collection prefix)
             # Pattern: CALCULATED_FIELD_NAME or CALCULATED_TOTAL_AMOUNT (standalone, not collection.field)
             # We need to replace ALL calculated field references in the formula
             # Formulas reference fields in uppercase (e.g., COMMISSION_VALUE), but we store them in lowercase
             
-            # Fix 3: Improved case conversion matching with multiple strategies
+            # Fix: Improved case conversion matching with multiple strategies
             # Track which fields have been replaced to avoid double replacement
             replaced_fields = set()
+            replacement_log = []
             
-            for calc_key, calc_value in calculated_fields.items():
+            # Sort calculated fields by length (longest first) to avoid partial matches
+            sorted_calc_fields = sorted(calculated_fields.items(), key=lambda x: len(x[0]), reverse=True)
+            
+            for calc_key, calc_value in sorted_calc_fields:
                 # Skip metadata fields
                 if calc_key in ['processed_at', 'updated_at'] or calc_key.endswith('_mapping_key'):
                     continue
@@ -1403,32 +1420,49 @@ class ScheduledJobsController:
                     continue
                 
                 value_str = str(calc_value) if calc_value is not None else "0"
-                
-                # Strategy 1: Exact match (lowercase) - check if formula uses lowercase
-                if calc_key in evaluated_formula:
-                    # Use word boundaries to ensure whole word match
-                    pattern_exact = r'(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
-                    if re.search(pattern_exact, evaluated_formula):
-                        evaluated_formula = re.sub(pattern_exact, value_str, evaluated_formula)
-                        replaced_fields.add(calc_key)
-                        continue
-                
-                # Strategy 2: Uppercase match with improved word boundaries (Fix 8)
                 upper_key = calc_key.upper()
-                # Fix 8: More robust pattern that handles edge cases
+                
+                # Strategy 1: Uppercase match (most common case - formulas use uppercase)
+                # This should be tried first since formulas typically use uppercase
                 pattern_upper = r'(?<![A-Za-z0-9_])' + re.escape(upper_key) + r'(?![A-Za-z0-9_])'
                 if re.search(pattern_upper, evaluated_formula):
+                    old_formula = evaluated_formula
                     evaluated_formula = re.sub(pattern_upper, value_str, evaluated_formula)
                     replaced_fields.add(calc_key)
+                    replacement_log.append(f"{upper_key} → {value_str}")
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] Replaced {upper_key} (from {calc_key}) with {value_str}")
+                        logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
                     continue
+                
+                # Strategy 2: Exact match (lowercase) - check if formula uses lowercase
+                if calc_key in evaluated_formula:
+                    pattern_exact = r'(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
+                    if re.search(pattern_exact, evaluated_formula):
+                        old_formula = evaluated_formula
+                        evaluated_formula = re.sub(pattern_exact, value_str, evaluated_formula)
+                        replaced_fields.add(calc_key)
+                        replacement_log.append(f"{calc_key} → {value_str}")
+                        if enable_debug_logging:
+                            logger.info(f"🔍 [FORMULA DEBUG] Replaced {calc_key} (exact match) with {value_str}")
+                            logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
+                        continue
                 
                 # Strategy 3: Case-insensitive match (fallback)
                 pattern_ci = r'(?i)(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
                 if re.search(pattern_ci, evaluated_formula):
+                    old_formula = evaluated_formula
                     evaluated_formula = re.sub(pattern_ci, value_str, evaluated_formula, flags=re.IGNORECASE)
                     replaced_fields.add(calc_key)
+                    replacement_log.append(f"{calc_key} (case-insensitive) → {value_str}")
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] Replaced {calc_key} (case-insensitive) with {value_str}")
+                        logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
                     continue
-                    
+            
+            if enable_debug_logging and replacement_log:
+                logger.info(f"🔍 [FORMULA DEBUG] All replacements made: {', '.join(replacement_log)}")
+                logger.info(f"🔍 [FORMULA DEBUG] Final formula after Step 2: {evaluated_formula}")
             
             # Step 3: Check for any remaining calculated field references that weren't replaced
             # Extract all potential calculated field references (uppercase identifiers with underscores)
@@ -1467,22 +1501,36 @@ class ScheduledJobsController:
             if not re.match(safe_pattern, evaluated_formula):
                 available_fields = [k.upper() for k in calculated_fields.keys() 
                                  if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
-                raise ValueError(
+                error_msg = (
                     f"Formula contains invalid characters after evaluation: {evaluated_formula}. "
                     f"Original formula: {formula_text}. "
                     f"Available calculated fields: {available_fields}"
                 )
+                if enable_debug_logging:
+                    logger.error(f"🔍 [FORMULA DEBUG] {error_msg}")
+                raise ValueError(error_msg)
+            
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Formula validated successfully: {evaluated_formula}")
             
             # Step 5: Evaluate the formula to get base value
             result = eval(evaluated_formula)
+            
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Eval result: {result} (type: {type(result)})")
             
             # Convert to appropriate type
             base_value = 0
             if isinstance(result, (int, float)):
                 base_value = float(result) if isinstance(result, float) else int(result)
             
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Base value: {base_value}")
+            
             # Step 6: If conditions are provided, evaluate them
             if conditions and len(conditions) > 0:
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] Evaluating {len(conditions)} condition(s)")
                 # Check each condition in order
                 for condition in conditions:
                     if self._evaluate_condition(base_value, condition):
@@ -1490,22 +1538,32 @@ class ScheduledJobsController:
                         formula_value_str = condition.get("formulaValue", "0")
                         try:
                             formula_value = float(formula_value_str)
+                            if enable_debug_logging:
+                                logger.info(f"🔍 [FORMULA DEBUG] Condition matched, returning: {formula_value}")
                             return formula_value
                         except (ValueError, TypeError):
                             logger.warning(f"⚠️ Invalid formulaValue in condition: {formula_value_str}")
                             return 0
                 
                 # No condition matched, return 0 as fallback
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] No condition matched, returning 0")
                 return 0
             
             # No conditions, return the base value
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] No conditions, returning base value: {base_value}")
             return base_value
             
         except ValueError as e:
             logger.error(f"❌ Validation error evaluating formula '{formula_text}': {e}")
+            if enable_debug_logging:
+                logger.error(f"🔍 [FORMULA DEBUG] ValueError details: {e}", exc_info=True)
             return None
         except Exception as e:
             logger.error(f"❌ Error evaluating formula '{formula_text}': {e}")
+            if enable_debug_logging:
+                logger.error(f"🔍 [FORMULA DEBUG] Exception details: {e}", exc_info=True)
             return None
     
     async def process_formula_calculations(
@@ -2803,11 +2861,15 @@ class ScheduledJobsController:
                             if found_deps:
                                 logger.info(f"  ✅ Found dependencies: {found_deps}")
                     
+                    # Enable debug logging for first 3 documents to diagnose formula evaluation issues
+                    enable_debug = (batch_number == 1 and processed_count < 3)
+                    
                     calculated_value = self._evaluate_formula(
                         formula_text,
                         doc,
                         calculated_fields,
-                        formula_conditions if formula_conditions else None
+                        formula_conditions if formula_conditions else None,
+                        enable_debug_logging=enable_debug
                     )
                     
                     # Fix 4: Better None handling - log error and investigate
