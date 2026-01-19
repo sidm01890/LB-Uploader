@@ -1028,10 +1028,19 @@ class ScheduledJobsController:
                 return None
             
             # Convert value to string safely
+            # Handle different types: dict, list, etc. should be converted to a meaningful string
             try:
-                value_str = str(value).strip()
+                if isinstance(value, dict):
+                    # For dicts, use a JSON-like representation or a hash
+                    import json
+                    value_str = json.dumps(value, sort_keys=True).strip()
+                elif isinstance(value, list):
+                    # For lists, join elements
+                    value_str = "_".join(str(v) for v in value).strip()
+                else:
+                    value_str = str(value).strip()
             except Exception as e:
-                logger.warning(f"⚠️ Error converting value to string for field '{field}': {e}. Skipping.")
+                logger.warning(f"⚠️ Error converting value to string for field '{field}': {type(value)}, error: {e}. Skipping.")
                 return None
             
             if value_str == "":
@@ -1041,7 +1050,11 @@ class ScheduledJobsController:
         if not values:
             return None
         
-        return "_".join(values)
+        try:
+            return "_".join(values)
+        except Exception as e:
+            logger.error(f"❌ Error joining mapping key values: {e}. Values: {values}")
+            return None
     
     def _build_condition_filter(self, conditions: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -1314,7 +1327,8 @@ class ScheduledJobsController:
         formula_text: str,
         document: Dict[str, Any],
         calculated_fields: Dict[str, Any],
-        conditions: Optional[List[Dict[str, Any]]] = None
+        conditions: Optional[List[Dict[str, Any]]] = None,
+        enable_debug_logging: bool = False
     ) -> Any:
         """
         Evaluate a formula using eval() with document values.
@@ -1327,13 +1341,19 @@ class ScheduledJobsController:
             document: Source document with field values
             calculated_fields: Dictionary of previously calculated fields
             conditions: Optional list of condition dictionaries to apply after formula evaluation
+            enable_debug_logging: If True, log detailed information about formula evaluation
         
         Returns:
             Calculated result value (or formulaValue from matching condition, or 0 if no condition matches)
         """
         try:
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Starting evaluation of: {formula_text}")
+                logger.info(f"🔍 [FORMULA DEBUG] Available calculated fields: {list(calculated_fields.keys())}")
+            
             # Check if formula is just a direct field reference like "zomato.order_date"
-            direct_field_pattern = r'^(\w+)\.(\w+)$'
+            # Pattern requires collection to start with a letter (not a digit) to avoid matching numeric literals
+            direct_field_pattern = r'^([a-zA-Z_]\w*)\.(\w+)$'
             match = re.match(direct_field_pattern, formula_text.strip())
 
             if match:
@@ -1343,9 +1363,13 @@ class ScheduledJobsController:
                 # For direct field references, return the value as-is (no numeric conversion)
                 value = document.get(field_name)
                 if value is not None:
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] Direct field reference: {field_name} = {value}")
                     return value  # Return datetime object, string, or any value directly
 
             evaluated_formula = formula_text
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Initial formula: {evaluated_formula}")
 
             # Step 1: Replace collection.field patterns with document values
             # Pattern: collection.field (e.g., "zomato.net_amount")
@@ -1365,47 +1389,98 @@ class ScheduledJobsController:
                 except (ValueError, TypeError):
                     return "0"
             
+            formula_before_step1 = evaluated_formula
+            # Fix: Only match collection.field patterns where collection starts with a letter (not a digit)
+            # This prevents matching numeric literals like 0.011, 0.001, 0.18
+            # Pattern: [a-zA-Z_]\w* matches: starts with letter/underscore, then word chars
             evaluated_formula = re.sub(
-                r'(\w+)\.(\w+)',
+                r'([a-zA-Z_]\w*)\.(\w+)',
                 replace_collection_field,
                 evaluated_formula
             )
+            if enable_debug_logging and formula_before_step1 != evaluated_formula:
+                logger.info(f"🔍 [FORMULA DEBUG] After Step 1 (collection.field replacement): {evaluated_formula}")
             
             # Step 2: Replace standalone calculated field references (uppercase, no collection prefix)
             # Pattern: CALCULATED_FIELD_NAME or CALCULATED_TOTAL_AMOUNT (standalone, not collection.field)
             # We need to replace ALL calculated field references in the formula
             # Formulas reference fields in uppercase (e.g., COMMISSION_VALUE), but we store them in lowercase
-            for calc_key, calc_value in calculated_fields.items():
+            
+            # Fix: Improved case conversion matching with multiple strategies
+            # Track which fields have been replaced to avoid double replacement
+            replaced_fields = set()
+            replacement_log = []
+            
+            # Sort calculated fields by length (longest first) to avoid partial matches
+            # This prevents replacing "POS" in "POS_PAYMENT" prematurely
+            sorted_calc_fields = sorted(calculated_fields.items(), key=lambda x: len(x[0]), reverse=True)
+            
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Step 2: Replacing calculated field references")
+                logger.info(f"🔍 [FORMULA DEBUG] Formula before Step 2: {evaluated_formula}")
+                logger.info(f"🔍 [FORMULA DEBUG] Available calculated fields (sorted by length): {[(k.upper(), v) for k, v in sorted_calc_fields[:10] if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]}")
+            
+            for calc_key, calc_value in sorted_calc_fields:
                 # Skip metadata fields
                 if calc_key in ['processed_at', 'updated_at'] or calc_key.endswith('_mapping_key'):
                     continue
                 
-                # Convert stored key (lowercase) to uppercase for matching
+                # Skip if already replaced
+                if calc_key in replaced_fields:
+                    continue
+                
+                value_str = str(calc_value) if calc_value is not None else "0"
                 upper_key = calc_key.upper()
                 
-                # Replace uppercase version in formula (e.g., "COMMISSION_VALUE" -> value)
-                # Use word boundaries to ensure we match the whole field name
-                pattern = r'\b' + re.escape(upper_key) + r'\b'
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] Trying to replace '{upper_key}' (from '{calc_key}' = {calc_value})")
                 
-                # Check if this field is referenced in the formula
-                if re.search(pattern, evaluated_formula):
-                    value_str = str(calc_value) if calc_value is not None else "0"
-                    # Replace all occurrences
-                    evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
-                    
-            
-            # Also try replacing with original case (in case formula uses lowercase)
-            for calc_key, calc_value in calculated_fields.items():
-                # Skip metadata fields
-                if calc_key in ['processed_at', 'updated_at'] or calc_key.endswith('_mapping_key'):
+                # Strategy 1: Uppercase match (most common case - formulas use uppercase)
+                # This should be tried first since formulas typically use uppercase
+                pattern_upper = r'(?<![A-Za-z0-9_])' + re.escape(upper_key) + r'(?![A-Za-z0-9_])'
+                matches_upper = re.search(pattern_upper, evaluated_formula)
+                if matches_upper:
+                    old_formula = evaluated_formula
+                    evaluated_formula = re.sub(pattern_upper, value_str, evaluated_formula)
+                    replaced_fields.add(calc_key)
+                    replacement_log.append(f"{upper_key} → {value_str}")
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] ✅ Strategy 1 (uppercase): Replaced '{upper_key}' with '{value_str}'")
+                        logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
                     continue
                 
-                # Try original case (lowercase) as well
-                pattern = r'\b' + re.escape(calc_key) + r'\b'
-                if re.search(pattern, evaluated_formula):
-                    value_str = str(calc_value) if calc_value is not None else "0"
-                    evaluated_formula = re.sub(pattern, value_str, evaluated_formula)
-                    
+                # Strategy 2: Exact match (lowercase) - check if formula uses lowercase
+                pattern_exact = r'(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
+                matches_exact = re.search(pattern_exact, evaluated_formula)
+                if matches_exact:
+                    old_formula = evaluated_formula
+                    evaluated_formula = re.sub(pattern_exact, value_str, evaluated_formula)
+                    replaced_fields.add(calc_key)
+                    replacement_log.append(f"{calc_key} → {value_str}")
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] ✅ Strategy 2 (exact): Replaced '{calc_key}' with '{value_str}'")
+                        logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
+                    continue
+                
+                # Strategy 3: Case-insensitive match (fallback)
+                pattern_ci = r'(?i)(?<![A-Za-z0-9_])' + re.escape(calc_key) + r'(?![A-Za-z0-9_])'
+                matches_ci = re.search(pattern_ci, evaluated_formula)
+                if matches_ci:
+                    old_formula = evaluated_formula
+                    evaluated_formula = re.sub(pattern_ci, value_str, evaluated_formula, flags=re.IGNORECASE)
+                    replaced_fields.add(calc_key)
+                    replacement_log.append(f"{calc_key} (case-insensitive) → {value_str}")
+                    if enable_debug_logging:
+                        logger.info(f"🔍 [FORMULA DEBUG] ✅ Strategy 3 (case-insensitive): Replaced '{calc_key}' with '{value_str}'")
+                        logger.info(f"🔍 [FORMULA DEBUG] Formula after replacement: {evaluated_formula}")
+                    continue
+                
+                if enable_debug_logging:
+                    logger.debug(f"🔍 [FORMULA DEBUG] ⏭️ No match found for '{upper_key}' or '{calc_key}' in formula")
+            
+            if enable_debug_logging and replacement_log:
+                logger.info(f"🔍 [FORMULA DEBUG] All replacements made: {', '.join(replacement_log)}")
+                logger.info(f"🔍 [FORMULA DEBUG] Final formula after Step 2: {evaluated_formula}")
             
             # Step 3: Check for any remaining calculated field references that weren't replaced
             # Extract all potential calculated field references (uppercase identifiers with underscores)
@@ -1444,22 +1519,45 @@ class ScheduledJobsController:
             if not re.match(safe_pattern, evaluated_formula):
                 available_fields = [k.upper() for k in calculated_fields.keys() 
                                  if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
-                raise ValueError(
+                error_msg = (
                     f"Formula contains invalid characters after evaluation: {evaluated_formula}. "
                     f"Original formula: {formula_text}. "
                     f"Available calculated fields: {available_fields}"
                 )
+                if enable_debug_logging:
+                    logger.error(f"🔍 [FORMULA DEBUG] {error_msg}")
+                raise ValueError(error_msg)
+            
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Formula validated successfully: {evaluated_formula}")
             
             # Step 5: Evaluate the formula to get base value
-            result = eval(evaluated_formula)
+            try:
+                result = eval(evaluated_formula)
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] ✅ Eval successful: {evaluated_formula} = {result} (type: {type(result)})")
+            except Exception as eval_error:
+                if enable_debug_logging:
+                    logger.error(f"🔍 [FORMULA DEBUG] ❌ Eval failed for formula: {evaluated_formula}")
+                    logger.error(f"🔍 [FORMULA DEBUG] Error: {type(eval_error).__name__}: {eval_error}")
+                    logger.error(f"🔍 [FORMULA DEBUG] Original formula: {formula_text}")
+                    logger.error(f"🔍 [FORMULA DEBUG] Available calculated fields: {list(calculated_fields.keys())}")
+                    logger.error(f"🔍 [FORMULA DEBUG] Replacement log: {replacement_log}")
+                # Re-raise to be caught by outer error handling
+                raise ValueError(f"Formula evaluation failed: {eval_error}. Formula: {evaluated_formula}. Original: {formula_text}")
             
             # Convert to appropriate type
             base_value = 0
             if isinstance(result, (int, float)):
                 base_value = float(result) if isinstance(result, float) else int(result)
             
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] Base value: {base_value}")
+            
             # Step 6: If conditions are provided, evaluate them
             if conditions and len(conditions) > 0:
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] Evaluating {len(conditions)} condition(s)")
                 # Check each condition in order
                 for condition in conditions:
                     if self._evaluate_condition(base_value, condition):
@@ -1467,22 +1565,32 @@ class ScheduledJobsController:
                         formula_value_str = condition.get("formulaValue", "0")
                         try:
                             formula_value = float(formula_value_str)
+                            if enable_debug_logging:
+                                logger.info(f"🔍 [FORMULA DEBUG] Condition matched, returning: {formula_value}")
                             return formula_value
                         except (ValueError, TypeError):
                             logger.warning(f"⚠️ Invalid formulaValue in condition: {formula_value_str}")
                             return 0
                 
                 # No condition matched, return 0 as fallback
+                if enable_debug_logging:
+                    logger.info(f"🔍 [FORMULA DEBUG] No condition matched, returning 0")
                 return 0
             
             # No conditions, return the base value
+            if enable_debug_logging:
+                logger.info(f"🔍 [FORMULA DEBUG] No conditions, returning base value: {base_value}")
             return base_value
             
         except ValueError as e:
             logger.error(f"❌ Validation error evaluating formula '{formula_text}': {e}")
+            if enable_debug_logging:
+                logger.error(f"🔍 [FORMULA DEBUG] ValueError details: {e}", exc_info=True)
             return None
         except Exception as e:
             logger.error(f"❌ Error evaluating formula '{formula_text}': {e}")
+            if enable_debug_logging:
+                logger.error(f"🔍 [FORMULA DEBUG] Exception details: {e}", exc_info=True)
             return None
     
     async def process_formula_calculations(
@@ -1666,47 +1774,75 @@ class ScheduledJobsController:
                     calculated_field_to_collection[logic_name_key.upper()] = source_collection
             
             # Group formulas by their primary source collection
-            # Include ALL formulas - those with source_collection and those without
+            # Use multi-pass assignment to handle dependencies between formulas without source_collection
             formulas_by_collection: Dict[str, List[Dict[str, Any]]] = {}
-            for meta in formulas_meta:
-                source_collection = meta.get("source_collection")
+            formulas_without_collection = []
+            remaining_formulas = formulas_meta.copy()
+            max_passes = 10  # Prevent infinite loops
+            pass_num = 0
+            
+            while remaining_formulas and pass_num < max_passes:
+                pass_num += 1
+                newly_assigned = []
+                
+                for meta in remaining_formulas[:]:  # Copy list to iterate safely
+                    source_collection = meta.get("source_collection")
+                    formula = meta["formula"]
+                    logic_name_key = formula.get("logicNameKey", "N/A")
+                    
+                    if source_collection:
+                        formulas_by_collection.setdefault(source_collection, []).append(formula)
+                        # Update calculated_field_to_collection for formulas with source_collection
+                        if logic_name_key:
+                            calculated_field_to_collection[logic_name_key.upper()] = source_collection
+                        newly_assigned.append(meta)
+                        logger.debug(f"📋 [Pass {pass_num}] Added formula '{logic_name_key}' to collection '{source_collection}'")
+                    else:
+                        # Formulas without source_collection: check if they depend on calculated fields
+                        formula_text = formula.get("formulaText", "")
+                        calc_refs = meta.get("calculated_field_references", [])
+                        
+                        # Find which collection(s) the calculated field dependencies come from
+                        dependent_collections = set()
+                        for calc_ref in calc_refs:
+                            calc_ref_upper = calc_ref.upper()
+                            if calc_ref_upper in calculated_field_to_collection:
+                                dependent_collections.add(calculated_field_to_collection[calc_ref_upper])
+                        
+                        if dependent_collections:
+                            # Assign to the first dependent collection (or primary if available)
+                            # Prefer non-primary collections first to ensure dependencies are calculated
+                            target_collection_name = None
+                            for coll in collection_order:
+                                if coll in dependent_collections:
+                                    target_collection_name = coll
+                                    break
+                            
+                            # If no match in collection_order, use the first dependent collection
+                            if not target_collection_name:
+                                target_collection_name = list(dependent_collections)[0]
+                            
+                            formulas_by_collection.setdefault(target_collection_name, []).append(formula)
+                            # Update calculated_field_to_collection for this formula too
+                            if logic_name_key:
+                                calculated_field_to_collection[logic_name_key.upper()] = target_collection_name
+                            newly_assigned.append(meta)
+                            logger.debug(f"📋 [Pass {pass_num}] Added formula '{logic_name_key}' (depends on {calc_refs}) to collection '{target_collection_name}' based on dependencies")
+                
+                # Remove assigned formulas from remaining list
+                for meta in newly_assigned:
+                    remaining_formulas.remove(meta)
+                
+                # If no new assignments, break
+                if not newly_assigned:
+                    break
+            
+            # Add any remaining formulas to formulas_without_collection
+            for meta in remaining_formulas:
                 formula = meta["formula"]
                 logic_name_key = formula.get("logicNameKey", "N/A")
-                
-                if source_collection:
-                    formulas_by_collection.setdefault(source_collection, []).append(formula)
-                    logger.debug(f"📋 Added formula '{logic_name_key}' to collection '{source_collection}'")
-                else:
-                    # Formulas without source_collection: check if they depend on calculated fields
-                    # from other collections and assign them to the appropriate collection
-                    formula_text = formula.get("formulaText", "")
-                    calc_refs = meta.get("calculated_field_references", [])
-                    
-                    # Find which collection(s) the calculated field dependencies come from
-                    dependent_collections = set()
-                    for calc_ref in calc_refs:
-                        if calc_ref in calculated_field_to_collection:
-                            dependent_collections.add(calculated_field_to_collection[calc_ref])
-                    
-                    if dependent_collections:
-                        # Assign to the first dependent collection (or primary if available)
-                        # Prefer non-primary collections first to ensure dependencies are calculated
-                        target_collection = None
-                        for coll in collection_order:
-                            if coll in dependent_collections:
-                                target_collection = coll
-                                break
-                        
-                        # If no match in collection_order, use the first dependent collection
-                        if not target_collection:
-                            target_collection = list(dependent_collections)[0]
-                        
-                        formulas_by_collection.setdefault(target_collection, []).append(formula)
-                        logger.debug(f"📋 Added formula '{logic_name_key}' (depends on {calc_refs}) to collection '{target_collection}' based on dependencies")
-                    else:
-                        # No calculated field dependencies found, add to formulas_without_collection
-                        formulas_without_collection.append(formula)
-                        logger.debug(f"📋 Added formula '{logic_name_key}' to formulas_without_collection (no source_collection, no calculated field dependencies)")
+                formulas_without_collection.append(formula)
+                logger.debug(f"📋 Added formula '{logic_name_key}' to formulas_without_collection (no source_collection, no resolvable dependencies)")
             
             # If no collections found but we have formulas, we need at least one collection to process
             # Try to determine primary collection from mapping_keys
@@ -1822,7 +1958,7 @@ class ScheduledJobsController:
                 
                 base_name = collection_name.replace("_processed", "")
                 # Ensure mapping_keys and conditions are dicts with string keys
-                # Get mapping_key_fields - ensure it's always a list
+                # Get mapping_key_fields - ensure it's always a list of strings
                 if not isinstance(mapping_keys, dict):
                     logger.error(f"❌ mapping_keys is not a dict: {type(mapping_keys)}")
                     mapping_key_fields = []
@@ -1831,7 +1967,10 @@ class ScheduledJobsController:
                     if mapping_key_value is None:
                         mapping_key_fields = []
                     elif isinstance(mapping_key_value, list):
-                        mapping_key_fields = mapping_key_value
+                        # Filter to ensure all items are strings
+                        mapping_key_fields = [f for f in mapping_key_value if isinstance(f, str)]
+                        if len(mapping_key_fields) != len(mapping_key_value):
+                            logger.warning(f"⚠️ Filtered out non-string items from mapping_key_fields for '{base_name}'. Original: {mapping_key_value}, Filtered: {mapping_key_fields}")
                     else:
                         logger.warning(f"⚠️ mapping_key_fields for '{base_name}' is not a list: {type(mapping_key_value)}, value: {mapping_key_value}. Using empty list.")
                         mapping_key_fields = []
@@ -1891,6 +2030,16 @@ class ScheduledJobsController:
                             # Build mapping key (pass doc_id for fallback when mapping_key_fields is empty)
                             mapping_key_value = self._build_mapping_key(doc, mapping_key_fields, doc_id=doc_id)
                             
+                            # Ensure mapping_key_value is a string (not dict or other type)
+                            if mapping_key_value is not None and not isinstance(mapping_key_value, str):
+                                logger.warning(f"⚠️ mapping_key_value is not a string: {type(mapping_key_value)}, value: {mapping_key_value}. Converting to string.")
+                                try:
+                                    mapping_key_value = str(mapping_key_value)
+                                except Exception as e:
+                                    logger.error(f"❌ Failed to convert mapping_key_value to string: {e}. Skipping document.")
+                                    skipped_count += 1
+                                    continue
+                            
                             # If still None after fallback, skip this document (should rarely happen)
                             if mapping_key_value is None:
                                 skipped_count += 1
@@ -1903,6 +2052,26 @@ class ScheduledJobsController:
                                     )
                                 continue
                             
+                            # Save mapping key back to source collection for future reference
+                            # This ensures source documents have their mapping keys for matching
+                            mapping_key_field_name = f"{base_name}_mapping_key"
+                            try:
+                                update_result = source_collection.update_one(
+                                    {"_id": doc_id},
+                                    {"$set": {mapping_key_field_name: mapping_key_value}},
+                                    upsert=False
+                                )
+                                # Log first few updates for verification
+                                if total_processed < 3:
+                                    logger.info(
+                                        f"🔑 Saved mapping key to source collection '{collection_name}': "
+                                        f"{mapping_key_field_name} = {mapping_key_value} "
+                                        f"(from fields: {mapping_key_fields})"
+                                    )
+                            except Exception as e:
+                                # Log but don't fail - mapping key will still be used for target collection
+                                logger.warning(f"⚠️ Could not update mapping key in source collection '{collection_name}': {e}")
+                            
                             batch_docs.append((doc, mapping_key_value))
                             
                             if len(batch_docs) >= batch_size:
@@ -1913,16 +2082,23 @@ class ScheduledJobsController:
                                     f"({len(batch_docs)} documents)"
                                 )
                                 
-                                processed, errors = await self._process_formula_batch(
-                                    batch_docs,
-                                    collection_name,
-                                    primary_mapping_key_field,
-                                    primary_collection_name,
-                                    mapping_key_fields,
-                                    collection_formulas,
-                                    target_collection,
-                                    batch_number
-                                )
+                                try:
+                                    processed, errors = await self._process_formula_batch(
+                                        batch_docs,
+                                        collection_name,
+                                        primary_mapping_key_field,
+                                        primary_collection_name,
+                                        mapping_key_fields,
+                                        collection_formulas,
+                                        target_collection,
+                                        batch_number
+                                    )
+                                except Exception as batch_error:
+                                    import traceback
+                                    logger.error(f"❌ Error in _process_formula_batch: {batch_error}")
+                                    logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                                    logger.error(f"❌ Batch details: collection={collection_name}, batch_size={len(batch_docs)}, first_doc_keys={list(batch_docs[0][0].keys())[:10] if batch_docs else 'N/A'}")
+                                    raise
                                 total_processed += processed
                                 total_errors += errors
                                 
@@ -1953,16 +2129,23 @@ class ScheduledJobsController:
                             f"({len(batch_docs)} documents)"
                         )
                         
-                        processed, errors = await self._process_formula_batch(
-                            batch_docs,
-                            collection_name,
-                            primary_mapping_key_field,
-                            primary_collection_name,
-                            mapping_key_fields,
-                            collection_formulas,
-                            target_collection,
-                            batch_number
-                        )
+                        try:
+                            processed, errors = await self._process_formula_batch(
+                                batch_docs,
+                                collection_name,
+                                primary_mapping_key_field,
+                                primary_collection_name,
+                                mapping_key_fields,
+                                collection_formulas,
+                                target_collection,
+                                batch_number
+                            )
+                        except Exception as batch_error:
+                            import traceback
+                            logger.error(f"❌ Error in final batch _process_formula_batch: {batch_error}")
+                            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                            logger.error(f"❌ Batch details: collection={collection_name}, batch_size={len(batch_docs)}, first_doc_keys={list(batch_docs[0][0].keys())[:10] if batch_docs else 'N/A'}")
+                            raise
                         total_processed += processed
                         total_errors += errors
                         
@@ -2499,28 +2682,105 @@ class ScheduledJobsController:
         """
         from pymongo import UpdateOne
         
-        current_base_name = current_collection.replace("_processed", "")
-        current_mapping_key_field = f"{current_base_name}_mapping_key"
+        # Validate inputs
+        if not isinstance(current_collection, str):
+            raise TypeError(f"current_collection must be str, got {type(current_collection)}")
+        if not isinstance(primary_mapping_key_field, str):
+            raise TypeError(f"primary_mapping_key_field must be str, got {type(primary_mapping_key_field)}")
+        if not isinstance(primary_collection_name, str):
+            raise TypeError(f"primary_collection_name must be str, got {type(primary_collection_name)}")
+        if not isinstance(mapping_key_fields, list):
+            raise TypeError(f"mapping_key_fields must be list, got {type(mapping_key_fields)}")
+        # Ensure all items in mapping_key_fields are strings
+        mapping_key_fields = [f for f in mapping_key_fields if isinstance(f, str)]
         
-        batch_keys = [key for _, key in batch_docs]
+        try:
+            current_base_name = current_collection.replace("_processed", "")
+            current_mapping_key_field = f"{current_base_name}_mapping_key"
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Error creating mapping key field name: {e}")
+            logger.error(f"❌ current_collection type: {type(current_collection)}, value: {current_collection}")
+            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+            raise
+        
+        # Ensure all batch_keys are strings (filter out any non-string values)
+        batch_keys = []
+        for _, key in batch_docs:
+            if isinstance(key, str):
+                batch_keys.append(key)
+            elif key is not None:
+                try:
+                    batch_keys.append(str(key))
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to convert mapping key to string: {type(key)}, value: {key}, error: {e}. Skipping.")
         
         # Fetch existing target docs matching primary or current mapping keys
-        existing_docs_cursor = target_collection.find(
-            {
+        try:
+            # Double-check that all values are strings
+            if not isinstance(primary_mapping_key_field, str):
+                raise TypeError(f"primary_mapping_key_field must be str, got {type(primary_mapping_key_field)}")
+            if not isinstance(current_mapping_key_field, str):
+                raise TypeError(f"current_mapping_key_field must be str, got {type(current_mapping_key_field)}")
+            
+            # Ensure all batch_keys are strings (final check)
+            validated_batch_keys = []
+            for key in batch_keys:
+                if isinstance(key, str):
+                    validated_batch_keys.append(key)
+                elif key is not None:
+                    try:
+                        validated_batch_keys.append(str(key))
+                    except Exception:
+                        logger.warning(f"⚠️ Skipping non-string key in batch_keys: {type(key)}")
+            
+            if not validated_batch_keys:
+                logger.warning("⚠️ No valid batch_keys after validation, skipping existing docs fetch")
+                existing_docs_cursor = None
+            else:
+                query = {
                 "$or": [
-                    {primary_mapping_key_field: {"$in": batch_keys}},
-                    {current_mapping_key_field: {"$in": batch_keys}}
-                ]
-            }
-        )
+                        {primary_mapping_key_field: {"$in": validated_batch_keys}},
+                        {current_mapping_key_field: {"$in": validated_batch_keys}}
+                    ]
+                }
+                existing_docs_cursor = target_collection.find(query)
+        except Exception as e:
+            import traceback
+            logger.error(f"❌ Error in MongoDB find query: {e}")
+            logger.error(f"❌ primary_mapping_key_field: {type(primary_mapping_key_field)}={primary_mapping_key_field}")
+            logger.error(f"❌ current_mapping_key_field: {type(current_mapping_key_field)}={current_mapping_key_field}")
+            logger.error(f"❌ batch_keys count: {len(batch_keys)}, types: {[type(k) for k in batch_keys[:5]]}")
+            logger.error(f"❌ target_collection type: {type(target_collection)}")
+            logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+            raise
         existing_map_primary: Dict[str, Dict[str, Any]] = {}
         existing_map_current: Dict[str, Dict[str, Any]] = {}
         try:
-            for existing in existing_docs_cursor:
-                if primary_mapping_key_field in existing:
-                    existing_map_primary[existing[primary_mapping_key_field]] = existing
-                if current_mapping_key_field in existing:
-                    existing_map_current[existing[current_mapping_key_field]] = existing
+            if existing_docs_cursor is None:
+                logger.warning("⚠️ No existing docs cursor, skipping existing docs fetch")
+            else:
+                for existing in existing_docs_cursor:
+                    if primary_mapping_key_field in existing:
+                        key_value = existing[primary_mapping_key_field]
+                        # Ensure key is a string before using as dictionary key
+                        if not isinstance(key_value, str):
+                            try:
+                                key_value = str(key_value)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to convert primary mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                                continue
+                        existing_map_primary[key_value] = existing
+                    if current_mapping_key_field in existing:
+                        key_value = existing[current_mapping_key_field]
+                        # Ensure key is a string before using as dictionary key
+                        if not isinstance(key_value, str):
+                            try:
+                                key_value = str(key_value)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to convert current mapping key to string: {type(key_value)}, error: {e}. Skipping.")
+                                continue
+                        existing_map_current[key_value] = existing
         finally:
             # Ensure cursor is closed
             if existing_docs_cursor:
@@ -2532,11 +2792,36 @@ class ScheduledJobsController:
         
         for doc, mapping_key_value in batch_docs:
             try:
+                # Ensure mapping_key_value is a string before using as dictionary key
+                if not isinstance(mapping_key_value, str):
+                    try:
+                        mapping_key_value = str(mapping_key_value)
+                    except Exception as e:
+                        logger.error(f"❌ Failed to convert mapping_key_value to string in batch processing: {type(mapping_key_value)}, error: {e}. Skipping document.")
+                        error_count += 1
+                        continue
+                
                 existing_doc = existing_map_primary.get(mapping_key_value) or existing_map_current.get(mapping_key_value)
                 
+                # Fix 1: Clear existing calculated field values before recalculating
+                # Only load non-calculated fields from existing document (like order_date, mapping keys)
+                # Calculated fields will be recalculated below, so we don't want stale values interfering
                 calculated_fields: Dict[str, Any] = {}
                 if existing_doc:
-                    calculated_fields.update({k: v for k, v in existing_doc.items() if not k.startswith("_")})
+                    # Get list of calculated field names (from formula logicNameKeys) to exclude
+                    calculated_field_names = {f.get('logicNameKey', '').lower() for f in collection_formulas if f.get('logicNameKey')}
+                    
+                    # Only copy non-calculated fields from existing document
+                    excluded_fields = ['processed_at', 'updated_at']
+                    for k, v in existing_doc.items():
+                        if not k.startswith("_") and k not in excluded_fields:
+                            # Only copy if it's NOT a calculated field (calculated fields will be recalculated)
+                            if k not in calculated_field_names:
+                                calculated_fields[k] = v
+                            else:
+                                # Log that we're skipping this calculated field (will be recalculated)
+                                if batch_number == 1 and processed_count == 0:
+                                    logger.debug(f"🔄 Skipping existing calculated field '{k}' - will be recalculated")
 
                 # Copy order_date from source document to ensure it's preserved in the target collection
                 if 'order_date' in doc and doc.get('order_date') is not None:
@@ -2563,28 +2848,124 @@ class ScheduledJobsController:
                     
                     calculated_field_name = logic_name_key.lower()
                     
-                    # Reduced logging - only log for first document of first batch
-                    if batch_number == 1 and processed_count == 0 and formula_idx == 0:
+                    # Fix 2: Validate dependencies before formula evaluation
+                    # Parse formula to check dependencies
+                    meta = self._parse_formula_text(formula_text)
+                    calc_deps = meta.get('calculated_field_references', [])
+                    
+                    # Check if all dependencies are available
+                    if calc_deps:
+                        available_upper = [k.upper() for k in calculated_fields.keys() 
+                                          if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
+                        missing = [dep for dep in calc_deps if dep.upper() not in available_upper]
+                        
+                        if missing:
+                            logger.error(
+                                f"❌ Cannot evaluate '{logic_name_key}' (position {formula_idx + 1}): "
+                                f"Missing dependencies {missing}. "
+                                f"Available calculated fields: {available_upper}. "
+                                f"Formula: {formula_text}. "
+                                f"This formula will be skipped."
+                            )
+                            # Skip this formula - don't evaluate it
+                            # Keep existing value if it exists, otherwise use 0
+                            if calculated_field_name not in calculated_fields:
+                                calculated_fields[calculated_field_name] = 0
+                                logger.warning(f"⚠️ Set '{logic_name_key}' to 0 (no existing value)")
+                            continue  # Skip to next formula
+                    
+                    # Fix 7: Enhanced debug logging for formula evaluation
+                    if batch_number == 1 and processed_count < 3:  # Log first 3 documents for debugging
                         available_calc_fields = [k.upper() for k in calculated_fields.keys() 
                                               if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]
-                        logger.debug(f"[Batch {batch_number}] Evaluating formula '{logic_name_key}': {formula_text}")
-                        logger.debug(f"Available calculated fields: {available_calc_fields}")
+                        logger.info(
+                            f"[Doc {processed_count + 1}, Formula {formula_idx + 1}] Evaluating '{logic_name_key}': {formula_text}"
+                        )
+                        logger.info(f"  Available calculated fields: {available_calc_fields}")
+                        if calc_deps:
+                            logger.info(f"  Dependencies needed: {calc_deps}")
+                            found_deps = [d for d in calc_deps if d.upper() in available_calc_fields]
+                            missing_deps = [d for d in calc_deps if d.upper() not in available_calc_fields]
+                            if found_deps:
+                                logger.info(f"  ✅ Found dependencies: {found_deps}")
+                            if missing_deps:
+                                logger.error(f"  ❌ Missing dependencies: {missing_deps}")
+                                # Log actual calculated_fields keys for debugging
+                                logger.error(f"  Calculated fields dict keys: {list(calculated_fields.keys())}")
+                                logger.error(f"  Calculated fields dict values (first 5): {dict(list(calculated_fields.items())[:5])}")
                     
-                    calculated_value = self._evaluate_formula(
-                        formula_text,
-                        doc,
-                        calculated_fields,
-                        formula_conditions if formula_conditions else None
-                    )
+                    # Enable debug logging for first 3 documents to diagnose formula evaluation issues
+                    enable_debug = (batch_number == 1 and processed_count < 3)
                     
-                    if calculated_value is None:
-                        logger.warning(f"⚠️ Formula '{logic_name_key}' (position {formula_idx + 1}) returned None, using 0")
+                    try:
+                        calculated_value = self._evaluate_formula(
+                            formula_text,
+                            doc,
+                            calculated_fields,
+                            formula_conditions if formula_conditions else None,
+                            enable_debug_logging=enable_debug
+                        )
+                        
+                        # Enhanced logging after evaluation
+                        if batch_number == 1 and processed_count < 3:
+                            logger.info(
+                                f"  ✅ Evaluated '{logic_name_key}': result = {calculated_value} (type: {type(calculated_value)})"
+                            )
+                    except Exception as eval_error:
+                        logger.error(
+                            f"❌ Error evaluating formula '{logic_name_key}' (position {formula_idx + 1}): {eval_error}"
+                        )
+                        logger.error(
+                            f"  Formula: {formula_text}"
+                        )
+                        logger.error(
+                            f"  Available calculated fields: {[k.upper() for k in calculated_fields.keys() if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]}"
+                        )
+                        if enable_debug:
+                            import traceback
+                            logger.error(f"  Full traceback:\n{traceback.format_exc()}")
+                        # Set to 0 on error
                         calculated_value = 0
+                        logger.warning(f"⚠️ Set '{logic_name_key}' to 0 due to evaluation error")
                     
+                    # Fix 4: Better None handling - log error and investigate
+                    if calculated_value is None:
+                        logger.error(
+                            f"❌ Formula '{logic_name_key}' (position {formula_idx + 1}) returned None. "
+                            f"Formula: {formula_text}. "
+                            f"Available calculated fields: {[k.upper() for k in calculated_fields.keys() if k not in ['processed_at', 'updated_at'] and not k.endswith('_mapping_key')]}. "
+                            f"This indicates a dependency issue or formula evaluation error."
+                        )
+                        # Option 1: Keep existing value if it exists
+                        if calculated_field_name in calculated_fields:
+                            calculated_value = calculated_fields[calculated_field_name]
+                            logger.warning(f"⚠️ Keeping existing value for '{logic_name_key}': {calculated_value}")
+                        else:
+                            # Option 2: Use 0 only if no existing value
+                            calculated_value = 0
+                            logger.warning(f"⚠️ No existing value found for '{logic_name_key}', using 0")
+                    
+                    # Fix 6: Always recalculate and log if value changed
+                    old_value = calculated_fields.get(calculated_field_name)
                     calculated_fields[calculated_field_name] = calculated_value
+                    
+                    # Log if value changed (for debugging)
+                    if old_value is not None and old_value != calculated_value and batch_number == 1 and processed_count < 3:
+                        logger.info(
+                            f"🔄 Recalculated '{logic_name_key}': {old_value} → {calculated_value}"
+                        )
                 
                 # Note: Delta columns and reasons are calculated AFTER all collections are processed
                 # This ensures all fields from all collections are available for delta/reason calculations
+                
+                # Ensure mapping_key_value is still a string (double-check)
+                if not isinstance(mapping_key_value, str):
+                    try:
+                        mapping_key_value = str(mapping_key_value)
+                    except Exception as e:
+                        logger.error(f"❌ Failed to convert mapping_key_value to string before filter query: {type(mapping_key_value)}, error: {e}. Skipping document.")
+                        error_count += 1
+                        continue
                 
                 calculated_fields[current_mapping_key_field] = mapping_key_value
                 calculated_fields['processed_at'] = datetime.utcnow()

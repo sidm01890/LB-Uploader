@@ -23,20 +23,29 @@ async def lifespan(app: FastAPI):
     logging.info(f"Environment: {env.value.upper()}")
     if config.enable_docs:
         logging.info("API Documentation available at /docs")
-
-    # Start automation scheduler
-    await startup_job_manager()
-    logging.info(
-        f"Job manager started: scheduler_running={job_manager.scheduler.running}, "
-        f"jobs={len(job_manager.get_scheduled_jobs())}"
-    )
-
+    
+    # Start job manager for scheduled collection processing
+    try:
+        await startup_job_manager()
+        logging.info(
+            f"✅ Job manager started - scheduler_running={job_manager.scheduler.running}, "
+            f"jobs={len(job_manager.get_scheduled_jobs())}"
+        )
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to start job manager: {e}. Collection processing scheduler will not run.")
+    
     try:
         yield
     finally:
         # Shutdown
         logging.info("File Upload Service API shutting down...")
-        await shutdown_job_manager()
+        
+        # Stop job manager
+        try:
+            await shutdown_job_manager()
+            logging.info("✅ Job manager stopped")
+        except Exception as e:
+            logging.warning(f"⚠️ Error stopping job manager: {e}")
 
 # Determine docs URLs based on environment
 docs_url = "/docs" if config.enable_docs else None

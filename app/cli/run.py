@@ -95,14 +95,29 @@ Examples:
     # Ensure project root is in path
     sys.path.insert(0, project_root)
     
-    # Check for required environment variables
-    required_vars = ["OPENAI_API_KEY", "MYSQL_HOST", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DB"]
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
-        print("Please check your application.properties file or environment configuration.")
-        sys.exit(1)
+    # Check for required environment variables (only in production)
+    # In development, most variables are optional with defaults
+    if env.is_production:
+        required_vars = ["OPENAI_API_KEY"]
+        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            print(f"❌ Missing required environment variables: {', '.join(missing_vars)}")
+            print("Please check your application.properties file or environment configuration.")
+            sys.exit(1)
+    else:
+        # In development, warn about missing optional variables but don't fail
+        optional_vars = {
+            "OPENAI_API_KEY": "OpenAI API key (optional for dev, required for AI features)",
+        }
+        missing_optional = {var: desc for var, desc in optional_vars.items() if not os.getenv(var)}
+        
+        if missing_optional:
+            print("⚠️  Optional environment variables not set (using defaults):")
+            for var, desc in missing_optional.items():
+                print(f"   - {var}: {desc}")
+            print("   To set these, create .env.dev or application-dev.properties file")
+            print()
     
     # Determine reload setting
     reload = config.uvicorn_reload

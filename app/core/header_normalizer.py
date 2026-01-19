@@ -4,7 +4,8 @@ Normalizes Excel/CSV column headers to valid, clean names
 """
 
 import re
-from typing import List
+import pandas as pd
+from typing import List, Optional
 
 
 def normalize_header(header: str) -> str:
@@ -174,7 +175,7 @@ def normalize_headers(headers: List[str]) -> List[str]:
     return normalized
 
 
-def normalize_dataframe_columns(df, inplace: bool = False):
+def normalize_dataframe_columns(df: pd.DataFrame, inplace: bool = False) -> Optional[pd.DataFrame]:
     """
     Normalize column names of a pandas DataFrame.
     
