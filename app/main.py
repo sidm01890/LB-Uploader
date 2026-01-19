@@ -22,14 +22,26 @@ async def lifespan(app: FastAPI):
     if config.enable_docs:
         logging.info("API Documentation available at /docs")
     
-    # Automation system removed - only file upload functionality is available
+    # Start job manager for scheduled collection processing
+    try:
+        from app.automation.job_manager import startup_job_manager, shutdown_job_manager
+        await startup_job_manager()
+        logging.info("✅ Job manager started - collection processing scheduler is active")
+    except Exception as e:
+        logging.warning(f"⚠️ Failed to start job manager: {e}. Collection processing scheduler will not run.")
     
     yield
     
     # Shutdown
     logging.info("File Upload Service API shutting down...")
     
-    # Automation system removed - only file upload functionality is available
+    # Stop job manager
+    try:
+        from app.automation.job_manager import shutdown_job_manager
+        await shutdown_job_manager()
+        logging.info("✅ Job manager stopped")
+    except Exception as e:
+        logging.warning(f"⚠️ Error stopping job manager: {e}")
 
 # Determine docs URLs based on environment
 docs_url = "/docs" if config.enable_docs else None

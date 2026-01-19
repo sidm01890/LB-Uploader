@@ -359,3 +359,120 @@ async def health_check():
             "database": config.mongodb.database
         }
     }
+
+
+# ============================================================================
+# COLLECTION PROCESSING ROUTES
+# ============================================================================
+
+@router.post(
+    "/process-collections",
+    tags=["Collection Processing"],
+    summary="Process collections manually",
+    description="Manually trigger processing of collections to calculate and save processed data. Processes all collections or a specific one, then calculates formulas.",
+    response_description="Processing status and results"
+)
+async def process_collections(
+    collection_name: Optional[str] = Query(
+        None,
+        description="Optional specific collection name to process. If not provided, processes all collections.",
+        example="zomato"
+    )
+):
+    """
+    Manually trigger collection processing and formula calculations.
+    
+    **What it does:**
+    1. Processes data from collections (e.g., `zomato`, `pos`) 
+    2. Applies field mappings and data sanitization
+    3. Saves processed data to `{collection_name}_processed` collections
+    4. Calculates formulas from the formulas collection
+    5. Saves calculated results to report collections
+    
+    **Parameters:**
+    - `collection_name` (optional): Process only this collection. If omitted, processes all collections.
+    
+    **Example:**
+    ```bash
+    # Process all collections and calculate formulas
+    curl -X POST 'http://localhost:8010/api/process-collections'
+    
+    # Process specific collection and calculate formulas
+    curl -X POST 'http://localhost:8010/api/process-collections?collection_name=zomato'
+    ```
+    """
+    from app.controllers.scheduled_jobs_controller import ScheduledJobsController
+    
+    try:
+        scheduled_jobs_controller = ScheduledJobsController()
+        
+        # Step 1: Process collections
+        result = await scheduled_jobs_controller.process_collection_data(collection_name=collection_name)
+        
+        # Step 2: Calculate formulas
+        formula_result = await scheduled_jobs_controller.process_formula_calculations(report_name=None)
+        
+        return {
+            "status": 200,
+            "message": "Collections processed and formulas calculated",
+            "data": {
+                "collection_processing": result.get("data", {}),
+                "formula_calculations": formula_result.get("data", {})
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error processing collections: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process collections: {str(e)}"
+        )
+
+
+@router.post(
+    "/process-formulas",
+    tags=["Collection Processing"],
+    summary="Calculate formulas manually",
+    description="Manually trigger formula calculations from the formulas collection. Processes all formulas or a specific report.",
+    response_description="Formula calculation status and results"
+)
+async def process_formulas(
+    report_name: Optional[str] = Query(
+        None,
+        description="Optional specific report name to process. If not provided, processes all reports.",
+        example="zomato_vs_pos"
+    )
+):
+    """
+    Manually trigger formula calculations.
+    
+    **What it does:**
+    - Reads formulas from the formulas collection
+    - Evaluates formulas using data from processed collections
+    - Calculates delta columns and reasons if configured
+    - Saves calculated results to report collections
+    
+    **Parameters:**
+    - `report_name` (optional): Process only this report. If omitted, processes all reports.
+    
+    **Example:**
+    ```bash
+    # Calculate all formulas
+    curl -X POST 'http://localhost:8010/api/process-formulas'
+    
+    # Calculate formulas for specific report
+    curl -X POST 'http://localhost:8010/api/process-formulas?report_name=zomato_vs_pos'
+    ```
+    """
+    from app.controllers.scheduled_jobs_controller import ScheduledJobsController
+    
+    try:
+        scheduled_jobs_controller = ScheduledJobsController()
+        result = await scheduled_jobs_controller.process_formula_calculations(report_name=report_name)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error processing formulas: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to process formulas: {str(e)}"
+        )

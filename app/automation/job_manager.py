@@ -17,12 +17,33 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
 
-# Import automation services
-from app.automation.sftp_service import SFTPAutomationService, SFTPConfig
-from app.automation.email_service import EmailProcessingService, EmailConfig
-from app.automation.notification_service import NotificationService, NotificationLevel, NotificationType
-from app.automation.orchestrator import AutomationOrchestrator, AutomationConfig
-from app.automation.config_factory import AutomationConfigFactory
+# Import automation services (lazy imports to avoid missing module errors)
+try:
+    from app.automation.sftp_service import SFTPAutomationService, SFTPConfig
+except ImportError:
+    SFTPAutomationService = None
+    SFTPConfig = None
+
+try:
+    from app.automation.email_service import EmailProcessingService, EmailConfig
+except ImportError:
+    EmailProcessingService = None
+    EmailConfig = None
+
+try:
+    from app.automation.notification_service import NotificationService, NotificationLevel, NotificationType
+except ImportError:
+    NotificationService = None
+    NotificationLevel = None
+    NotificationType = None
+
+try:
+    from app.automation.orchestrator import AutomationOrchestrator, AutomationConfig
+    from app.automation.config_factory import AutomationConfigFactory
+except ImportError:
+    AutomationOrchestrator = None
+    AutomationConfig = None
+    AutomationConfigFactory = None
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +54,7 @@ class JobType(str, Enum):
     DAILY_REPORT = "daily_report"
     FILE_CLEANUP = "file_cleanup"
     HEALTH_CHECK = "health_check"
+    COLLECTION_PROCESSING = "collection_processing"
 
 class JobFrequency(str, Enum):
     ONCE = "once"
@@ -274,6 +296,9 @@ class ScheduledJobManager:
                 elif job_config.job_type == JobType.HEALTH_CHECK:
                     result = await self._execute_health_check_job(job_config.job_config)
                 
+                elif job_config.job_type == JobType.COLLECTION_PROCESSING:
+                    result = await self._execute_collection_processing_job(job_config.job_config)
+                
                 else:
                     raise ValueError(f"Unsupported job type: {job_config.job_type}")
                 
@@ -315,6 +340,13 @@ class ScheduledJobManager:
     async def _execute_sftp_job(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
         """Execute SFTP download job"""
         
+        if SFTPAutomationService is None or SFTPConfig is None:
+            return {
+                "success": False,
+                "job_type": "sftp_download",
+                "error": "SFTP service not available (module not installed)"
+            }
+        
         try:
             # Create or get cached SFTP service
             service_key = f"sftp_{hash(json.dumps(job_config, sort_keys=True))}"
@@ -346,6 +378,13 @@ class ScheduledJobManager:
     async def _execute_email_job(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
         """Execute email processing job"""
         
+        if EmailProcessingService is None or EmailConfig is None:
+            return {
+                "success": False,
+                "job_type": "email_processing",
+                "error": "Email service not available (module not installed)"
+            }
+        
         try:
             # Create or get cached email service
             service_key = f"email_{hash(json.dumps(job_config, sort_keys=True))}"
@@ -376,6 +415,13 @@ class ScheduledJobManager:
     
     async def _execute_workflow_job(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
         """Execute full workflow job"""
+        
+        if AutomationOrchestrator is None or AutomationConfigFactory is None:
+            return {
+                "success": False,
+                "job_type": "full_workflow",
+                "error": "Workflow service not available (module not installed)"
+            }
         
         try:
             # Create automation configuration
@@ -537,7 +583,7 @@ class ScheduledJobManager:
             )
             
             # Send alert if unhealthy
-            if not is_healthy and self.notification_service:
+            if not is_healthy and self.notification_service and NotificationService is not None and NotificationLevel is not None:
                 await self.notification_service.send_error_alert(
                     process_name="Scheduled Job System",
                     error_type="Health Check Failed",
@@ -557,6 +603,55 @@ class ScheduledJobManager:
             return {
                 "success": False,
                 "job_type": "health_check",
+                "error": str(e)
+            }
+    
+    async def _execute_collection_processing_job(self, job_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute collection processing job - processes data from collections to processed collections and calculates formulas"""
+        
+        try:
+            from app.controllers.scheduled_jobs_controller import ScheduledJobsController
+            
+            # Get optional collection_name from job config, or process all collections
+            collection_name = job_config.get("collection_name", None)
+            
+            # Create controller instance
+            scheduled_jobs_controller = ScheduledJobsController()
+            
+            # Step 1: Execute collection processing (processes raw data to processed collections)
+            logger.info("🔄 Step 1: Processing collections...")
+            result = await scheduled_jobs_controller.process_collection_data(collection_name=collection_name)
+            
+            # Extract processing results
+            data = result.get("data", {})
+            total_documents = data.get("total_documents_processed", 0)
+            collections_processed = data.get("collections_processed", 0)
+            
+            # Step 2: Execute formula calculations (calculates formulas from formulas collection)
+            logger.info("🔄 Step 2: Calculating formulas...")
+            formula_result = await scheduled_jobs_controller.process_formula_calculations(report_name=None)
+            
+            # Extract formula calculation results
+            formula_data = formula_result.get("data", {})
+            formula_reports = formula_data.get("reports_processed", 0)
+            formula_documents = formula_data.get("total_documents_processed", 0)
+            
+            return {
+                "success": result.get("status") == 200 and formula_result.get("status") == 200,
+                "job_type": "collection_processing",
+                "collections_processed": collections_processed,
+                "total_documents_processed": total_documents,
+                "formula_reports_processed": formula_reports,
+                "formula_documents_processed": formula_documents,
+                "collection_results": data.get("results", []),
+                "formula_results": formula_data.get("results", [])
+            }
+            
+        except Exception as e:
+            logger.error(f"Error executing collection processing job: {e}", exc_info=True)
+            return {
+                "success": False,
+                "job_type": "collection_processing",
                 "error": str(e)
             }
     
@@ -581,12 +676,13 @@ class ScheduledJobManager:
             
             # Send failure notification if configured
             elif status == "failed" and job_config.notification_on_failure:
-                await self.notification_service.send_error_alert(
-                    process_name=job_config.job_name,
-                    error_type="Scheduled Job Failure",
-                    description=execution_record.get("error", "Unknown error"),
-                    alert_level=NotificationLevel.ERROR
-                )
+                if NotificationService is not None and NotificationLevel is not None:
+                    await self.notification_service.send_error_alert(
+                        process_name=job_config.job_name,
+                        error_type="Scheduled Job Failure",
+                        description=execution_record.get("error", "Unknown error"),
+                        alert_level=NotificationLevel.ERROR
+                    )
                 
         except Exception as e:
             logger.warning(f"Failed to send job notification: {str(e)}")
@@ -678,6 +774,20 @@ class ScheduledJobManager:
             )
             
             await self.add_scheduled_job(health_job)
+            
+            # Collection processing job - runs every 30 minutes to process data from collections to processed collections
+            collection_processing_job = ScheduledJobConfig(
+                job_id="collection_processing_periodic",
+                job_name="Collection Data Processing",
+                job_type=JobType.COLLECTION_PROCESSING,
+                frequency=JobFrequency.MINUTELY,
+                schedule_params={"minutes": 30},
+                job_config={"collection_name": None},  # None means process all collections
+                enabled=True,
+                notification_on_success=False,
+                notification_on_failure=True
+            )
+            await self.add_scheduled_job(collection_processing_job)
             
             logger.info("✅ Default system jobs added successfully")
             
