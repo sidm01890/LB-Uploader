@@ -22,7 +22,7 @@ COPY requirements.txt .
 # Note: Some packages like PySpark may take time to install
 RUN pip install --no-cache-dir -r requirements.txt || \
     (echo "Some optional packages failed to install, continuing..." && \
-     pip install --no-cache-dir fastapi uvicorn python-multipart python-dotenv pydantic-settings pyyaml sqlalchemy aiomysql pymysql mysql-connector-python pandas openpyxl)
+     pip install --no-cache-dir fastapi uvicorn python-multipart python-dotenv pydantic-settings pyyaml sqlalchemy aiomysql pymysql mysql-connector-python pandas openpyxl pymongo redis)
 
 # Copy application code
 COPY . .
