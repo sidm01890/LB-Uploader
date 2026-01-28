@@ -2794,6 +2794,13 @@ class ScheduledJobsController:
                                 logger.warning(f"⚠️ Failed to convert current mapping key to string: {type(key_value)}, error: {e}. Skipping.")
                                 continue
                         existing_map_current[key_value] = existing
+                        
+                        # Also extract order ID from current mapping key for enhanced matching
+                        # Mapping keys are typically in format: "{order_id}_{date}"
+                        if '_' in key_value:
+                            order_id_from_key = key_value.split('_')[0]
+                            if order_id_from_key and order_id_from_key not in existing_map_by_order_id:
+                                existing_map_by_order_id[order_id_from_key] = existing
         finally:
             # Ensure cursor is closed
             if existing_docs_cursor:
@@ -2816,36 +2823,72 @@ class ScheduledJobsController:
                 
                 existing_doc = existing_map_primary.get(mapping_key_value) or existing_map_current.get(mapping_key_value)
                 
+                # Debug: Log matching status for POS collection (first batch, first 10 docs)
+                if 'pos_bercos' in current_collection.lower() and batch_number == 1 and processed_count < 10:
+                    logger.info(
+                        f"🔍 Matching check: collection='{current_collection}', "
+                        f"primary='{primary_collection_name}', "
+                        f"mapping_key='{mapping_key_value}', "
+                        f"existing_doc_found={existing_doc is not None}, "
+                        f"in_primary_map={mapping_key_value in existing_map_primary}, "
+                        f"in_current_map={mapping_key_value in existing_map_current}, "
+                        f"primary_map_size={len(existing_map_primary)}, "
+                        f"order_id_map_size={len(existing_map_by_order_id)}"
+                    )
+                
                 # Enhanced Matching: If no match by mapping key, try matching by order ID
                 # This handles cases where mapping keys differ due to date format differences
                 # but order IDs match (e.g., POS aggregator_order_no matches Zomato order_id)
+                # The order ID is embedded in the mapping key itself (format: "{order_id}_{date}")
                 if not existing_doc and current_collection != primary_collection_name:
-                    # Extract order ID from current document
-                    # For POS: use aggregator_order_no
-                    # For Zomato: use order_id
+                    # Extract order ID from mapping key (format: "{order_id}_{date}")
+                    # Try to extract order ID from the mapping key itself
                     order_id_to_match = None
+                    
+                    # First, try to get order ID from document fields (if available)
                     if 'pos_bercos' in current_collection.lower() or 'pos_' in current_collection.lower():
-                        # POS collection - try aggregator_order_no
+                        # POS collection - try aggregator_order_no from document
                         order_id_to_match = doc.get('aggregator_order_no')
                         if order_id_to_match:
                             order_id_to_match = str(order_id_to_match)
                     elif 'zomato' in current_collection.lower():
-                        # Zomato collection - try order_id
+                        # Zomato collection - try order_id from document
                         order_id_to_match = doc.get('order_id')
                         if order_id_to_match:
                             order_id_to_match = str(order_id_to_match)
+                    
+                    # If order ID not found in document, extract from mapping key
+                    # Mapping keys are typically in format: "{order_id}_{date}"
+                    if not order_id_to_match and isinstance(mapping_key_value, str) and '_' in mapping_key_value:
+                        order_id_to_match = mapping_key_value.split('_')[0]
+                        if order_id_to_match:
+                            order_id_to_match = str(order_id_to_match)
+                    
+                    # Debug logging for enhanced matching attempts
+                    if batch_number == 1 and processed_count < 10:
+                        logger.info(
+                            f"🔍 Enhanced matching check: collection='{current_collection}', "
+                            f"primary='{primary_collection_name}', order_id='{order_id_to_match}', "
+                            f"existing_map_size={len(existing_map_by_order_id)}, "
+                            f"mapping_key='{mapping_key_value}'"
+                        )
                     
                     # If we have an order ID, try to find matching document by order ID
                     # Use the pre-built lookup map for fast access
                     if order_id_to_match and order_id_to_match in existing_map_by_order_id:
                         matching_doc = existing_map_by_order_id[order_id_to_match]
                         existing_doc = matching_doc
-                        if batch_number == 1 and processed_count < 5:
-                            logger.info(
-                                f"🔗 Enhanced matching: Found document by order ID '{order_id_to_match}' "
-                                f"(mapping keys didn't match: current='{mapping_key_value}', "
-                                f"found='{matching_doc.get(primary_mapping_key_field, 'N/A')}')"
-                            )
+                        logger.info(
+                            f"🔗 Enhanced matching: Found document by order ID '{order_id_to_match}' "
+                            f"(mapping keys didn't match: current='{mapping_key_value}', "
+                            f"found='{matching_doc.get(primary_mapping_key_field, 'N/A')}')"
+                        )
+                    elif order_id_to_match and batch_number == 1 and processed_count < 10:
+                        # Log when order ID exists but no match found
+                        logger.warning(
+                            f"⚠️ Enhanced matching: Order ID '{order_id_to_match}' not found in existing_map_by_order_id "
+                            f"(collection='{current_collection}', mapping_key='{mapping_key_value}')"
+                        )
                 
                 # Fix 1: Clear existing calculated field values before recalculating
                 # Only load non-calculated fields from existing document (like order_date, mapping keys)
