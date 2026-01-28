@@ -2756,6 +2756,10 @@ class ScheduledJobsController:
             raise
         existing_map_primary: Dict[str, Dict[str, Any]] = {}
         existing_map_current: Dict[str, Dict[str, Any]] = {}
+        # Enhanced matching: Map order IDs to documents for fast lookup
+        # Format: order_id -> document (for matching when mapping keys don't match)
+        existing_map_by_order_id: Dict[str, Dict[str, Any]] = {}
+        
         try:
             if existing_docs_cursor is None:
                 logger.warning("⚠️ No existing docs cursor, skipping existing docs fetch")
@@ -2771,6 +2775,15 @@ class ScheduledJobsController:
                                 logger.warning(f"⚠️ Failed to convert primary mapping key to string: {type(key_value)}, error: {e}. Skipping.")
                                 continue
                         existing_map_primary[key_value] = existing
+                        
+                        # Extract order ID from mapping key for enhanced matching
+                        # Mapping keys are typically in format: "{order_id}_{date}"
+                        # Try to extract order ID (part before first underscore)
+                        if '_' in key_value:
+                            order_id_from_key = key_value.split('_')[0]
+                            if order_id_from_key and order_id_from_key not in existing_map_by_order_id:
+                                existing_map_by_order_id[order_id_from_key] = existing
+                    
                     if current_mapping_key_field in existing:
                         key_value = existing[current_mapping_key_field]
                         # Ensure key is a string before using as dictionary key
@@ -2802,6 +2815,37 @@ class ScheduledJobsController:
                         continue
                 
                 existing_doc = existing_map_primary.get(mapping_key_value) or existing_map_current.get(mapping_key_value)
+                
+                # Enhanced Matching: If no match by mapping key, try matching by order ID
+                # This handles cases where mapping keys differ due to date format differences
+                # but order IDs match (e.g., POS aggregator_order_no matches Zomato order_id)
+                if not existing_doc and current_collection != primary_collection_name:
+                    # Extract order ID from current document
+                    # For POS: use aggregator_order_no
+                    # For Zomato: use order_id
+                    order_id_to_match = None
+                    if 'pos_bercos' in current_collection.lower() or 'pos_' in current_collection.lower():
+                        # POS collection - try aggregator_order_no
+                        order_id_to_match = doc.get('aggregator_order_no')
+                        if order_id_to_match:
+                            order_id_to_match = str(order_id_to_match)
+                    elif 'zomato' in current_collection.lower():
+                        # Zomato collection - try order_id
+                        order_id_to_match = doc.get('order_id')
+                        if order_id_to_match:
+                            order_id_to_match = str(order_id_to_match)
+                    
+                    # If we have an order ID, try to find matching document by order ID
+                    # Use the pre-built lookup map for fast access
+                    if order_id_to_match and order_id_to_match in existing_map_by_order_id:
+                        matching_doc = existing_map_by_order_id[order_id_to_match]
+                        existing_doc = matching_doc
+                        if batch_number == 1 and processed_count < 5:
+                            logger.info(
+                                f"🔗 Enhanced matching: Found document by order ID '{order_id_to_match}' "
+                                f"(mapping keys didn't match: current='{mapping_key_value}', "
+                                f"found='{matching_doc.get(primary_mapping_key_field, 'N/A')}')"
+                            )
                 
                 # Fix 1: Clear existing calculated field values before recalculating
                 # Only load non-calculated fields from existing document (like order_date, mapping keys)
@@ -2970,10 +3014,23 @@ class ScheduledJobsController:
                 calculated_fields[current_mapping_key_field] = mapping_key_value
                 calculated_fields['processed_at'] = datetime.utcnow()
                 
+                # Determine filter query for upsert
+                # If we found an existing document via enhanced matching, use its primary mapping key
                 if current_collection == primary_collection_name:
                     filter_query = {primary_mapping_key_field: mapping_key_value}
                 else:
-                    if mapping_key_value in existing_map_primary:
+                    # Check if we found a document via enhanced matching
+                    if existing_doc and primary_mapping_key_field in existing_doc:
+                        # Use the primary mapping key from the matched document
+                        primary_key_value = existing_doc.get(primary_mapping_key_field)
+                        if primary_key_value:
+                            filter_query = {primary_mapping_key_field: primary_key_value}
+                            # Also ensure we set the primary mapping key in calculated_fields
+                            calculated_fields[primary_mapping_key_field] = primary_key_value
+                        else:
+                            # Fallback to current mapping key
+                            filter_query = {current_mapping_key_field: mapping_key_value}
+                    elif mapping_key_value in existing_map_primary:
                         filter_query = {primary_mapping_key_field: mapping_key_value}
                     elif mapping_key_value in existing_map_current:
                         filter_query = {current_mapping_key_field: mapping_key_value}
